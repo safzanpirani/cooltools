@@ -194,6 +194,7 @@ export const EFFECTS: Effect[] = [
     name: "CRT",
     category: "Glitch",
     blurb: "Scanlines, screen curvature, bleed & vignette.",
+    animated: true,
     controls: [
       slider("uScan", "Scanlines", 0, 1, 0.01, 0.4),
       slider("uCurve", "Curvature", 0, 1, 0.01, 0.25),
@@ -281,6 +282,7 @@ export const EFFECTS: Effect[] = [
     name: "Wave",
     category: "Distort",
     blurb: "Sinusoidal ripple displacement.",
+    animated: true,
     controls: [
       slider("uAmp", "Amplitude", 0, 0.1, 0.001, 0.02),
       slider("uFreq", "Frequency", 1, 60, 0.5, 18),
@@ -299,6 +301,7 @@ export const EFFECTS: Effect[] = [
     name: "Scatter",
     category: "Glitch",
     blurb: "Horizontal slice displacement / data-mosh bands.",
+    animated: true,
     controls: [
       slider("uBands", "Bands", 4, 120, 1, 32),
       slider("uShift", "Shift", 0, 0.3, 0.001, 0.05),
@@ -311,6 +314,181 @@ export const EFFECTS: Effect[] = [
       float seed = hash(band + floor(uTime * uSpeed));
       float amt = (seed - 0.5) * 2.0 * uShift * step(0.6, seed);
       return texture(uTexture, vec2(fract(uv.x + amt), uv.y)).rgb;
+    }`,
+  },
+
+  {
+    id: "kuwahara",
+    name: "Kuwahara",
+    category: "Stylize",
+    blurb: "Edge-preserving oil-paint smear.",
+    controls: [slider("uRadius", "Radius", 1, 8, 1, 4)],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 px = 1.0 / uResolution;
+      int r = int(clamp(uRadius, 1.0, 8.0));
+      vec3 best = texture(uTexture, uv).rgb;
+      float bestVar = 1e9;
+      for (int q = 0; q < 4; q++){
+        vec2 sgn = vec2((q == 0 || q == 2) ? -1.0 : 1.0, (q < 2) ? -1.0 : 1.0);
+        vec3 sum = vec3(0.0); float sum2 = 0.0; float n = 0.0;
+        for (int i = 0; i <= 8; i++){
+          if (i > r) break;
+          for (int j = 0; j <= 8; j++){
+            if (j > r) break;
+            vec3 c = texture(uTexture, uv + vec2(float(i)*sgn.x, float(j)*sgn.y) * px).rgb;
+            sum += c; sum2 += dot(c, c); n += 1.0;
+          }
+        }
+        vec3 m = sum / n;
+        float v = sum2 / n - dot(m, m);
+        if (v < bestVar){ bestVar = v; best = m; }
+      }
+      return best;
+    }`,
+  },
+
+  {
+    id: "stipple",
+    name: "Stipple",
+    category: "Halftone",
+    blurb: "Pen-plotter dots, density follows darkness.",
+    controls: [
+      slider("uCell", "Spacing", 2, 16, 1, 6),
+      slider("uSize", "Dot size", 0.2, 1.6, 0.05, 0.9),
+      slider("uJitter", "Jitter", 0, 1, 0.01, 0.6),
+      color("uInk", "Ink", "#101010"),
+      color("uPaper", "Paper", "#f6f4ee"),
+    ],
+    glsl: `
+    float hash21(vec2 p){
+      p = fract(p * vec2(123.34, 456.21));
+      p += dot(p, p + 45.32);
+      return fract(p.x * p.y);
+    }
+    vec3 effect(vec2 uv){
+      vec2 cells = uResolution / uCell;
+      vec2 cell = floor(uv * cells);
+      float lum = dot(texture(uTexture, (cell + 0.5)/cells).rgb, vec3(0.299,0.587,0.114));
+      vec2 j = (vec2(hash21(cell), hash21(cell + 7.3)) - 0.5) * uJitter;
+      vec2 dotc = (cell + 0.5 + j) / cells;
+      float d = length((uv - dotc) * cells);
+      float radius = sqrt(clamp(1.0 - lum, 0.0, 1.0)) * 0.5 * uSize;
+      float dot = smoothstep(radius, radius - 0.12, d);
+      return mix(uPaper, uInk, dot);
+    }`,
+  },
+
+  {
+    id: "lowpoly",
+    name: "Low-poly",
+    category: "Geometric",
+    blurb: "Triangular-lattice flat shading.",
+    controls: [
+      slider("uSize", "Facet size", 8, 90, 1, 28),
+      slider("uEdge", "Edge", 0, 1, 0.01, 0),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 cells = uResolution / uSize;
+      vec2 p = uv * cells;
+      vec2 cell = floor(p);
+      vec2 f = fract(p);
+      vec2 cen = f.x + f.y < 1.0
+        ? cell + vec2(1.0/3.0, 1.0/3.0)
+        : cell + vec2(2.0/3.0, 2.0/3.0);
+      vec3 c = texture(uTexture, cen / cells).rgb;
+      float edge = min(min(f.x, f.y), abs(f.x + f.y - 1.0));
+      c *= 1.0 - uEdge * (1.0 - smoothstep(0.0, 0.06, edge));
+      return c;
+    }`,
+  },
+
+  {
+    id: "voronoi",
+    name: "Voronoi",
+    category: "Geometric",
+    blurb: "Crystallised stained-glass cells.",
+    controls: [
+      slider("uScale", "Cell size", 6, 70, 1, 26),
+      slider("uEdge", "Leading", 0, 1, 0.01, 0.4),
+    ],
+    glsl: `
+    float h1(vec2 p){
+      p = fract(p * vec2(123.34, 456.21));
+      p += dot(p, p + 45.32);
+      return fract(p.x * p.y);
+    }
+    vec2 h2(vec2 p){ return vec2(h1(p), h1(p + 19.19)); }
+    vec3 effect(vec2 uv){
+      vec2 cells = uResolution / uScale;
+      vec2 p = uv * cells;
+      vec2 g = floor(p); vec2 f = fract(p);
+      float md1 = 1e9, md2 = 1e9; vec2 best = g;
+      for (int y = -1; y <= 1; y++){
+        for (int x = -1; x <= 1; x++){
+          vec2 o = vec2(float(x), float(y));
+          vec2 fp = o + h2(g + o);
+          float d = length(fp - f);
+          if (d < md1){ md2 = md1; md1 = d; best = g + o + h2(g + o); }
+          else if (d < md2){ md2 = d; }
+        }
+      }
+      vec3 c = texture(uTexture, best / cells).rgb;
+      float line = smoothstep(0.0, uEdge * 0.16 + 0.001, md2 - md1);
+      return c * mix(1.0, line, step(0.001, uEdge));
+    }`,
+  },
+
+  {
+    id: "crosshatch",
+    name: "Crosshatch",
+    category: "Stylize",
+    blurb: "Pen-and-ink hatching by tone.",
+    controls: [
+      slider("uDensity", "Spacing", 3, 16, 0.5, 7),
+      slider("uStrength", "Strength", 0.2, 2, 0.05, 1.1),
+      color("uInk", "Ink", "#0c0c10"),
+      color("uPaper", "Paper", "#fbfaf5"),
+    ],
+    glsl: `
+    float hatch(vec2 px, float a, float sp){
+      float v = px.x * cos(a) + px.y * sin(a);
+      return abs(fract(v / sp) - 0.5) * 2.0;
+    }
+    vec3 effect(vec2 uv){
+      vec2 px = uv * uResolution;
+      float lum = clamp(dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114)), 0.0, 1.0);
+      float sp = uDensity;
+      float ink = 0.0;
+      if (lum < 0.85) ink = max(ink, 1.0 - smoothstep(0.0, 0.45, hatch(px, 0.785, sp)));
+      if (lum < 0.62) ink = max(ink, 1.0 - smoothstep(0.0, 0.45, hatch(px, -0.785, sp)));
+      if (lum < 0.42) ink = max(ink, 1.0 - smoothstep(0.0, 0.45, hatch(px, 0.0, sp)));
+      if (lum < 0.22) ink = max(ink, 1.0 - smoothstep(0.0, 0.45, hatch(px, 1.5708, sp)));
+      return mix(uPaper, uInk, clamp(ink * uStrength, 0.0, 1.0));
+    }`,
+  },
+
+  {
+    id: "kaleidoscope",
+    name: "Kaleidoscope",
+    category: "Distort",
+    blurb: "Radial mirror symmetry.",
+    controls: [
+      slider("uSegments", "Segments", 3, 16, 1, 6),
+      slider("uSpin", "Rotate", 0, 1, 0.001, 0),
+      slider("uZoom", "Zoom", 0.4, 2.5, 0.01, 1),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 p = uv - 0.5;
+      float r = length(p);
+      float a = atan(p.y, p.x) + uSpin * 6.2831853;
+      float seg = 6.2831853 / uSegments;
+      a = mod(a, seg);
+      a = abs(a - seg * 0.5);
+      vec2 q = vec2(cos(a), sin(a)) * r * uZoom + 0.5;
+      return texture(uTexture, clamp(q, 0.0, 1.0)).rgb;
     }`,
   },
 ];

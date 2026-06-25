@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Renderer } from "../gl/renderer";
+import { EFFECT_BY_ID } from "../effects/list";
 import { fitToCanvas, useStore } from "../store";
 
 export function Preview() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
+  const dirty = useRef(true);
   const source = useStore((s) => s.source);
   const setSource = useStore((s) => s.setSource);
   const [error, setError] = useState<string | null>(null);
@@ -22,26 +24,42 @@ export function Preview() {
     }
     rendererRef.current = renderer;
 
+    // re-render on any state change; keep animating while an effect uses time
+    const unsub = useStore.subscribe(() => {
+      dirty.current = true;
+    });
+
     let raf = 0;
     const start = performance.now();
     const loop = () => {
-      const t = (performance.now() - start) / 1000;
-      try {
-        renderer.render(useStore.getState().pipeline, t);
-        setError(null);
-      } catch (e) {
-        setError(String(e));
+      const { pipeline } = useStore.getState();
+      const animated = pipeline.some(
+        (n) => n.enabled && EFFECT_BY_ID[n.effectId]?.animated,
+      );
+      if (dirty.current || animated) {
+        const t = (performance.now() - start) / 1000;
+        try {
+          renderer.render(pipeline, t);
+          setError(null);
+        } catch (e) {
+          setError(String(e));
+        }
+        dirty.current = false;
       }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      unsub();
+      cancelAnimationFrame(raf);
+    };
   }, []);
 
   // push source into renderer when it changes
   useEffect(() => {
     if (source && rendererRef.current) {
       rendererRef.current.setSource(source.el, source.w, source.h);
+      dirty.current = true;
     }
   }, [source]);
 

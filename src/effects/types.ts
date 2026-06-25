@@ -50,6 +50,8 @@ export interface Effect {
   category: string;
   blurb: string;
   controls: Control[];
+  // true if the effect uses uTime — render loop keeps animating it
+  animated?: boolean;
   // GLSL body: helper fns + `vec3 effect(vec2 uv)`. May read uTexture,
   // uResolution, uTime and any control uniform.
   glsl: string;
