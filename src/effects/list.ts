@@ -491,6 +491,196 @@ export const EFFECTS: Effect[] = [
       return texture(uTexture, clamp(q, 0.0, 1.0)).rgb;
     }`,
   },
+
+  {
+    id: "gradientmap",
+    name: "Gradient Map",
+    category: "Color",
+    blurb: "Remap luminance through a 3-stop gradient.",
+    controls: [
+      color("uShadow", "Shadows", "#0b0033"),
+      color("uMid", "Mids", "#ff2e88"),
+      color("uHigh", "Highlights", "#ffe34d"),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      float l = dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114));
+      return l < 0.5 ? mix(uShadow, uMid, l*2.0) : mix(uMid, uHigh, (l-0.5)*2.0);
+    }`,
+  },
+
+  {
+    id: "threshold",
+    name: "Threshold",
+    category: "Color",
+    blurb: "Hard two-tone cut with a soft knee.",
+    controls: [
+      slider("uThreshold", "Threshold", 0, 1, 0.01, 0.5),
+      slider("uKnee", "Softness", 0, 0.3, 0.005, 0.02),
+      color("uDark", "Dark", "#0a0a12"),
+      color("uLight", "Light", "#ffffff"),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      float l = dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114));
+      return mix(uDark, uLight, smoothstep(uThreshold - uKnee, uThreshold + uKnee, l));
+    }`,
+  },
+
+  {
+    id: "solarize",
+    name: "Solarize",
+    category: "Color",
+    blurb: "Sabattier — invert tones above a threshold.",
+    controls: [slider("uThreshold", "Threshold", 0, 1, 0.01, 0.5)],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec3 c = texture(uTexture, uv).rgb;
+      return mix(c, 1.0 - c, step(vec3(uThreshold), c));
+    }`,
+  },
+
+  {
+    id: "sharpen",
+    name: "Sharpen",
+    category: "Tone",
+    blurb: "Unsharp-mask crispening.",
+    controls: [slider("uAmount", "Amount", 0, 3, 0.05, 1)],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 t = 1.0 / uResolution;
+      vec3 c = texture(uTexture, uv).rgb;
+      vec3 b = (texture(uTexture, uv+t*vec2(1,0)).rgb + texture(uTexture, uv+t*vec2(-1,0)).rgb
+              + texture(uTexture, uv+t*vec2(0,1)).rgb + texture(uTexture, uv+t*vec2(0,-1)).rgb) * 0.25;
+      return clamp(c + (c - b) * uAmount, 0.0, 1.0);
+    }`,
+  },
+
+  {
+    id: "neon",
+    name: "Neon",
+    category: "Stylize",
+    blurb: "Glowing edge lines on a dark field.",
+    controls: [
+      slider("uStrength", "Edge", 1, 8, 0.1, 3),
+      slider("uGlow", "Glow", 0, 3, 0.05, 1.3),
+      color("uColor", "Glow color", "#19f0ff"),
+      color("uBg", "Background", "#05060a"),
+    ],
+    glsl: `
+    float lum(vec2 uv){ return dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114)); }
+    vec3 effect(vec2 uv){
+      vec2 t = 1.0 / uResolution;
+      float tl=lum(uv+t*vec2(-1,-1)), l=lum(uv+t*vec2(-1,0)), bl=lum(uv+t*vec2(-1,1));
+      float tr=lum(uv+t*vec2(1,-1)),  r=lum(uv+t*vec2(1,0)),  br=lum(uv+t*vec2(1,1));
+      float tm=lum(uv+t*vec2(0,-1)),  bm=lum(uv+t*vec2(0,1));
+      float gx = -tl - 2.0*l - bl + tr + 2.0*r + br;
+      float gy = -tl - 2.0*tm - tr + bl + 2.0*bm + br;
+      float e = clamp(length(vec2(gx,gy)) * uStrength, 0.0, 1.0);
+      return uBg + uColor * pow(e, 1.4) * uGlow;
+    }`,
+  },
+
+  {
+    id: "sketch",
+    name: "Sketch",
+    category: "Stylize",
+    blurb: "Pencil sketch via color-dodge.",
+    controls: [slider("uRadius", "Stroke", 0, 6, 0.5, 2)],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 t = (1.0 + uRadius) / uResolution;
+      float g = dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114));
+      float inv = 0.0; float w = 0.0;
+      for (int x=-2; x<=2; x++){
+        for (int y=-2; y<=2; y++){
+          inv += 1.0 - dot(texture(uTexture, uv + t*vec2(float(x),float(y))).rgb, vec3(0.299,0.587,0.114));
+          w += 1.0;
+        }
+      }
+      inv /= w;
+      float dodge = inv >= 1.0 ? 1.0 : min(1.0, g / (1.0 - inv));
+      return vec3(dodge);
+    }`,
+  },
+
+  {
+    id: "emboss",
+    name: "Emboss",
+    category: "Stylize",
+    blurb: "Directional relief.",
+    controls: [
+      slider("uStrength", "Depth", 1, 6, 0.1, 2),
+      slider("uAngle", "Angle", 0, 1, 0.001, 0.125),
+      toggle("uGray", "Grayscale", 1),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 dir = vec2(cos(uAngle*6.2831853), sin(uAngle*6.2831853)) / uResolution * (1.0 + uStrength);
+      vec3 e = (texture(uTexture, uv+dir).rgb - texture(uTexture, uv-dir).rgb) + 0.5;
+      if (uGray > 0.5) return vec3(dot(e, vec3(0.299,0.587,0.114)));
+      return e;
+    }`,
+  },
+
+  {
+    id: "cmyk",
+    name: "Color Halftone",
+    category: "Halftone",
+    blurb: "CMYK angled dot screens — true print color.",
+    controls: [slider("uCell", "Cell size", 3, 24, 0.5, 7)],
+    glsl: `
+    mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+    float screen(vec2 uv, float angle, float value){
+      vec2 px = uv * uResolution;
+      vec2 rp = rot(radians(angle)) * px;
+      vec2 g = floor(rp/uCell)*uCell + uCell*0.5;
+      float d = length(rp - g) / (uCell * 0.5);
+      float r = sqrt(clamp(value, 0.0, 1.0));
+      return smoothstep(r + 0.05, r - 0.05, d);
+    }
+    vec3 effect(vec2 uv){
+      vec3 rgb = texture(uTexture, uv).rgb;
+      float k = 1.0 - max(max(rgb.r, rgb.g), rgb.b);
+      float ik = max(1.0 - k, 0.001);
+      float c = (1.0 - rgb.r - k) / ik;
+      float m = (1.0 - rgb.g - k) / ik;
+      float y = (1.0 - rgb.b - k) / ik;
+      vec3 col = vec3(1.0);
+      col -= vec3(1.0,0.0,0.0) * screen(uv, 15.0, c);
+      col -= vec3(0.0,1.0,0.0) * screen(uv, 75.0, m);
+      col -= vec3(0.0,0.0,1.0) * screen(uv, 0.0,  y);
+      col -= vec3(1.0)         * screen(uv, 45.0, k);
+      return clamp(col, 0.0, 1.0);
+    }`,
+  },
+
+  {
+    id: "film",
+    name: "Film",
+    category: "Stylize",
+    blurb: "Animated grain, warm grade & vignette.",
+    animated: true,
+    controls: [
+      slider("uGrain", "Grain", 0, 1, 0.01, 0.4),
+      slider("uVignette", "Vignette", 0, 1.5, 0.01, 0.6),
+      slider("uWarm", "Warmth", 0, 1, 0.01, 0.3),
+    ],
+    glsl: `
+    float hash(vec2 p){
+      p = fract(p * vec2(123.34, 456.21));
+      p += dot(p, p + 45.32);
+      return fract(p.x * p.y);
+    }
+    vec3 effect(vec2 uv){
+      vec3 c = texture(uTexture, uv).rgb;
+      float g = hash(uv * uResolution + fract(uTime) * 431.0);
+      c += (g - 0.5) * uGrain * 0.5;
+      c += vec3(uWarm * 0.06, 0.0, -uWarm * 0.04);
+      c *= clamp(1.0 - uVignette * dot(uv - 0.5, uv - 0.5) * 2.0, 0.0, 1.0);
+      return clamp(c, 0.0, 1.0);
+    }`,
+  },
 ];
 
 export const EFFECT_BY_ID: Record<string, Effect> = Object.fromEntries(

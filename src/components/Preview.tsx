@@ -32,10 +32,15 @@ export function Preview() {
     let raf = 0;
     const start = performance.now();
     const loop = () => {
-      const { pipeline } = useStore.getState();
-      const animated = pipeline.some(
-        (n) => n.enabled && EFFECT_BY_ID[n.effectId]?.animated,
-      );
+      const { pipeline, source } = useStore.getState();
+      const live = source?.live === true;
+      if (live) {
+        renderer.updateSource(source.el);
+        dirty.current = true;
+      }
+      const animated =
+        live ||
+        pipeline.some((n) => n.enabled && EFFECT_BY_ID[n.effectId]?.animated);
       if (dirty.current || animated) {
         const t = (performance.now() - start) / 1000;
         try {

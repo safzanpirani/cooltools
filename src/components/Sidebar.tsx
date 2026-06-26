@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { CATEGORIES, EFFECTS, EFFECT_BY_ID } from "../effects/list";
 import { encodeState, fitToCanvas, useStore } from "../store";
+import { PRESETS } from "../presets";
 import { Controls } from "./Controls";
 
 export function Sidebar() {
@@ -15,6 +16,10 @@ export function Sidebar() {
   const surprise = useStore((s) => s.surprise);
   const clear = useStore((s) => s.clear);
   const setSource = useStore((s) => s.setSource);
+  const applyPreset = useStore((s) => s.applyPreset);
+  const source = useStore((s) => s.source);
+  const startWebcam = useStore((s) => s.startWebcam);
+  const stopWebcam = useStore((s) => s.stopWebcam);
   const fileRef = useRef<HTMLInputElement>(null);
   const [toast, setToast] = useState("");
 
@@ -60,6 +65,23 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="toolbar">
         <button onClick={() => fileRef.current?.click()}>↑ image</button>
+        {source?.live ? (
+          <button className="cam-on" onClick={stopWebcam}>
+            ■ stop cam
+          </button>
+        ) : (
+          <button
+            onClick={async () => {
+              try {
+                await startWebcam();
+              } catch {
+                flash("camera unavailable");
+              }
+            }}
+          >
+            ◉ webcam
+          </button>
+        )}
         <button onClick={exportPNG}>↓ png</button>
         <button onClick={share}>⟴ share</button>
         <button onClick={surprise}>✦ surprise</button>
@@ -73,6 +95,15 @@ export function Sidebar() {
           hidden
           onChange={(e) => onUpload(e.target.files?.[0])}
         />
+      </div>
+
+      <div className="section-title">presets</div>
+      <div className="presets">
+        {PRESETS.map((p) => (
+          <button key={p.name} onClick={() => applyPreset(p)}>
+            {p.name}
+          </button>
+        ))}
       </div>
 
       <div className="section-title">

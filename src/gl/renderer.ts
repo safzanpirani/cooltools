@@ -149,20 +149,17 @@ export class Renderer {
     return t;
   }
 
-  setSource(img: TexImageSource, w: number, h: number) {
+  private uploadSrc(img: TexImageSource) {
     const gl = this.gl;
-    this.width = w;
-    this.height = h;
-    gl.canvas.width = w;
-    gl.canvas.height = h;
-
     if (!this.srcTex) this.srcTex = this.makeTex();
     gl.bindTexture(gl.TEXTURE_2D, this.srcTex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  }
 
-    // (re)allocate ping-pong targets
+  private allocateTargets(w: number, h: number) {
+    const gl = this.gl;
     if (!this.fbos) {
       this.fbos = [gl.createFramebuffer()!, gl.createFramebuffer()!];
       this.texs = [this.makeTex(), this.makeTex()];
@@ -180,6 +177,22 @@ export class Renderer {
       );
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  setSource(img: TexImageSource, w: number, h: number) {
+    if (w !== this.width || h !== this.height) {
+      this.width = w;
+      this.height = h;
+      this.gl.canvas.width = w;
+      this.gl.canvas.height = h;
+      this.allocateTargets(w, h);
+    }
+    this.uploadSrc(img);
+  }
+
+  // re-upload only the source texture (per-frame webcam), dims unchanged
+  updateSource(img: TexImageSource) {
+    this.uploadSrc(img);
   }
 
   private pass(

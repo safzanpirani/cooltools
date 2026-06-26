@@ -1,12 +1,14 @@
 import { create } from "zustand";
 import { EFFECT_BY_ID, EFFECTS } from "./effects/list";
 import type { ParamValue, PipelineNode } from "./effects/types";
+import type { Preset } from "./presets";
 
 export interface Source {
-  el: HTMLCanvasElement;
+  el: HTMLCanvasElement | HTMLVideoElement;
   w: number;
   h: number;
   name: string;
+  live?: boolean;
 }
 
 interface State {
@@ -23,7 +25,12 @@ interface State {
   setExpanded: (uid: string | null) => void;
   clear: () => void;
   surprise: () => void;
+  applyPreset: (preset: Preset) => void;
+  startWebcam: () => Promise<void>;
+  stopWebcam: () => void;
 }
+
+let webcamStream: MediaStream | null = null;
 
 const MAX_DIM = 1600;
 let counter = 0;
@@ -163,6 +170,47 @@ export const useStore = create<State>((set) => ({
       nodes.push({ uid: uid(), effectId: e.id, enabled: true, params });
     }
     set({ pipeline: nodes, expanded: null });
+  },
+
+  applyPreset: (preset) => {
+    const nodes: PipelineNode[] = preset.nodes.map((n) => ({
+      uid: uid(),
+      effectId: n.effectId,
+      enabled: true,
+      params: { ...defaultParams(n.effectId), ...(n.params ?? {}) },
+    }));
+    set({ pipeline: nodes, expanded: null });
+  },
+
+  startWebcam: async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720 },
+      audio: false,
+    });
+    webcamStream = stream;
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    await video.play();
+    set({
+      source: {
+        el: video,
+        w: video.videoWidth || 1280,
+        h: video.videoHeight || 720,
+        name: "webcam",
+        live: true,
+      },
+    });
+  },
+
+  stopWebcam: () => {
+    if (webcamStream) {
+      webcamStream.getTracks().forEach((t) => t.stop());
+      webcamStream = null;
+    }
+    const { el, w, h } = sampleImage();
+    set({ source: { el, w, h, name: "sample" } });
   },
 }));
 
