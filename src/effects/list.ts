@@ -1,8 +1,20 @@
 import { type Effect, slider, toggle, color } from "./types";
 import { buildGlyphAtlas } from "./glyph";
 
-// shared GLSL helpers available to copy into effects
-const LUMA = "const vec3 LW = vec3(0.299, 0.587, 0.114);";
+// Shared helpers (LW, luma, lumAt, hash11, hash21, rot) are injected into
+// every effect's shader by the renderer — see PRELUDE in gl/renderer.ts.
+
+const blur1D = (dir: string) => `
+    vec3 effect(vec2 uv){
+      vec2 t = ${dir} * (uRadius / uResolution) / 6.0;
+      vec3 sum = vec3(0.0); float wsum = 0.0;
+      for (int i = -6; i <= 6; i++){
+        float w = exp(-float(i*i) / 18.0);
+        sum += texture(uTexture, uv + t * float(i)).rgb * w;
+        wsum += w;
+      }
+      return sum / wsum;
+    }`;
 
 export const EFFECTS: Effect[] = [
   {
@@ -17,7 +29,7 @@ export const EFFECTS: Effect[] = [
       slider("uSaturation", "Saturation", 0, 2, 0.01, 1),
       slider("uHue", "Hue shift", 0, 1, 0.001, 0),
     ],
-    glsl: `${LUMA}
+    glsl: `
     vec3 hueShift(vec3 c, float h){
       const vec3 k = vec3(0.57735);
       float ca = cos(h*6.2831853), sa = sin(h*6.2831853);
@@ -27,8 +39,7 @@ export const EFFECTS: Effect[] = [
       vec3 c = texture(uTexture, uv).rgb;
       c = pow(max(c,0.0), vec3(1.0/uGamma));
       c = (c - 0.5) * uContrast + 0.5 + uBrightness;
-      float l = dot(c, LW);
-      c = mix(vec3(l), c, uSaturation);
+      c = mix(vec3(luma(c)), c, uSaturation);
       c = hueShift(c, uHue);
       return clamp(c, 0.0, 1.0);
     }`,
@@ -58,7 +69,7 @@ export const EFFECTS: Effect[] = [
       float t = bayer(pix);
       float n = max(uLevels, 2.0) - 1.0;
       if (uMono > 0.5){
-        float g = dot(c, vec3(0.299,0.587,0.114));
+        float g = luma(c);
         return vec3(clamp(floor(g*n + t + 0.5)/n, 0.0, 1.0));
       }
       return clamp(floor(c*n + t + 0.5)/n, 0.0, 1.0);
@@ -78,14 +89,13 @@ export const EFFECTS: Effect[] = [
       color("uBg", "Paper", "#f4f1ea"),
     ],
     glsl: `
-    mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
     vec3 effect(vec2 uv){
       vec2 px = uv * uResolution;
       float a = radians(uAngle);
       vec2 rp = rot(a) * px;
       vec2 g = floor(rp/uCell)*uCell + uCell*0.5;
       vec2 sp = (rot(-a) * g) / uResolution;
-      float lum = dot(texture(uTexture, sp).rgb, vec3(0.299,0.587,0.114));
+      float lum = lumAt(sp);
       if (uInvert > 0.5) lum = 1.0 - lum;
       float d = length(rp - g) / (uCell * 0.5);
       float r = sqrt(clamp(1.0 - lum, 0.0, 1.0));
@@ -113,7 +123,7 @@ export const EFFECTS: Effect[] = [
       vec2 cell = floor(uv * cells);
       vec2 center = (cell + 0.5) / cells;
       vec3 src = texture(uTexture, center).rgb;
-      float lum = dot(src, vec3(0.299,0.587,0.114));
+      float lum = luma(src);
       if (uInvert > 0.5) lum = 1.0 - lum;
       float gi = floor(clamp(1.0 - lum, 0.0, 0.999) * uGlyphCount);
       vec2 local = fract(uv * cells);
@@ -159,8 +169,7 @@ export const EFFECTS: Effect[] = [
       vec3 c = texture(uTexture, uv).rgb;
       float n = max(uLevels, 2.0);
       if (uDuotone > 0.5){
-        float g = dot(c, vec3(0.299,0.587,0.114));
-        g = floor(g * n) / (n - 1.0);
+        float g = floor(luma(c) * n) / (n - 1.0);
         return mix(uDark, uLight, clamp(g, 0.0, 1.0));
       }
       return floor(c * n) / (n - 1.0);
@@ -234,12 +243,11 @@ export const EFFECTS: Effect[] = [
       color("uPaper", "Paper", "#ffffff"),
     ],
     glsl: `
-    float lum(vec2 uv){ return dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114)); }
     vec3 effect(vec2 uv){
       vec2 t = 1.0 / uResolution;
-      float tl=lum(uv+t*vec2(-1,-1)), l=lum(uv+t*vec2(-1,0)), bl=lum(uv+t*vec2(-1,1));
-      float tr=lum(uv+t*vec2(1,-1)),  r=lum(uv+t*vec2(1,0)),  br=lum(uv+t*vec2(1,1));
-      float tm=lum(uv+t*vec2(0,-1)),  bm=lum(uv+t*vec2(0,1));
+      float tl=lumAt(uv+t*vec2(-1,-1)), l=lumAt(uv+t*vec2(-1,0)), bl=lumAt(uv+t*vec2(-1,1));
+      float tr=lumAt(uv+t*vec2(1,-1)),  r=lumAt(uv+t*vec2(1,0)),  br=lumAt(uv+t*vec2(1,1));
+      float tm=lumAt(uv+t*vec2(0,-1)),  bm=lumAt(uv+t*vec2(0,1));
       float gx = -tl - 2.0*l - bl + tr + 2.0*r + br;
       float gy = -tl - 2.0*tm - tr + bl + 2.0*bm + br;
       float e = clamp(length(vec2(gx,gy)) * uStrength, 0.0, 1.0);
@@ -268,7 +276,7 @@ export const EFFECTS: Effect[] = [
         for (int y=-2; y<=2; y++){
           float w = 1.0 / (1.0 + float(x*x + y*y));
           vec3 s = texture(uTexture, uv + t*vec2(float(x), float(y))).rgb;
-          float b = max(dot(s, vec3(0.299,0.587,0.114)) - uThreshold, 0.0);
+          float b = max(luma(s) - uThreshold, 0.0);
           sum += s * b * w;
           wsum += w;
         }
@@ -308,10 +316,9 @@ export const EFFECTS: Effect[] = [
       slider("uSpeed", "Speed", 0, 5, 0.01, 1),
     ],
     glsl: `
-    float hash(float n){ return fract(sin(n*78.233)*43758.5453); }
     vec3 effect(vec2 uv){
       float band = floor(uv.y * uBands);
-      float seed = hash(band + floor(uTime * uSpeed));
+      float seed = hash11(band + floor(uTime * uSpeed));
       float amt = (seed - 0.5) * 2.0 * uShift * step(0.6, seed);
       return texture(uTexture, vec2(fract(uv.x + amt), uv.y)).rgb;
     }`,
@@ -323,25 +330,24 @@ export const EFFECTS: Effect[] = [
     category: "Stylize",
     blurb: "Edge-preserving oil-paint smear.",
     controls: [slider("uRadius", "Radius", 1, 8, 1, 4)],
+    // fixed 4x4 grid per quadrant (64 taps total) with spacing scaled by
+    // uRadius — constant cost, no dynamic loop bounds
     glsl: `
     vec3 effect(vec2 uv){
-      vec2 px = 1.0 / uResolution;
-      int r = int(clamp(uRadius, 1.0, 8.0));
+      vec2 px = uRadius / (3.0 * uResolution);
       vec3 best = texture(uTexture, uv).rgb;
       float bestVar = 1e9;
       for (int q = 0; q < 4; q++){
         vec2 sgn = vec2((q == 0 || q == 2) ? -1.0 : 1.0, (q < 2) ? -1.0 : 1.0);
-        vec3 sum = vec3(0.0); float sum2 = 0.0; float n = 0.0;
-        for (int i = 0; i <= 8; i++){
-          if (i > r) break;
-          for (int j = 0; j <= 8; j++){
-            if (j > r) break;
+        vec3 sum = vec3(0.0); float sum2 = 0.0;
+        for (int i = 0; i <= 3; i++){
+          for (int j = 0; j <= 3; j++){
             vec3 c = texture(uTexture, uv + vec2(float(i)*sgn.x, float(j)*sgn.y) * px).rgb;
-            sum += c; sum2 += dot(c, c); n += 1.0;
+            sum += c; sum2 += dot(c, c);
           }
         }
-        vec3 m = sum / n;
-        float v = sum2 / n - dot(m, m);
+        vec3 m = sum / 16.0;
+        float v = sum2 / 16.0 - dot(m, m);
         if (v < bestVar){ bestVar = v; best = m; }
       }
       return best;
@@ -361,15 +367,10 @@ export const EFFECTS: Effect[] = [
       color("uPaper", "Paper", "#f6f4ee"),
     ],
     glsl: `
-    float hash21(vec2 p){
-      p = fract(p * vec2(123.34, 456.21));
-      p += dot(p, p + 45.32);
-      return fract(p.x * p.y);
-    }
     vec3 effect(vec2 uv){
       vec2 cells = uResolution / uCell;
       vec2 cell = floor(uv * cells);
-      float lum = dot(texture(uTexture, (cell + 0.5)/cells).rgb, vec3(0.299,0.587,0.114));
+      float lum = lumAt((cell + 0.5)/cells);
       vec2 j = (vec2(hash21(cell), hash21(cell + 7.3)) - 0.5) * uJitter;
       vec2 dotc = (cell + 0.5 + j) / cells;
       float d = length((uv - dotc) * cells);
@@ -414,12 +415,7 @@ export const EFFECTS: Effect[] = [
       slider("uEdge", "Leading", 0, 1, 0.01, 0.4),
     ],
     glsl: `
-    float h1(vec2 p){
-      p = fract(p * vec2(123.34, 456.21));
-      p += dot(p, p + 45.32);
-      return fract(p.x * p.y);
-    }
-    vec2 h2(vec2 p){ return vec2(h1(p), h1(p + 19.19)); }
+    vec2 h2(vec2 p){ return vec2(hash21(p), hash21(p + 19.19)); }
     vec3 effect(vec2 uv){
       vec2 cells = uResolution / uScale;
       vec2 p = uv * cells;
@@ -458,7 +454,7 @@ export const EFFECTS: Effect[] = [
     }
     vec3 effect(vec2 uv){
       vec2 px = uv * uResolution;
-      float lum = clamp(dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114)), 0.0, 1.0);
+      float lum = clamp(lumAt(uv), 0.0, 1.0);
       float sp = uDensity;
       float ink = 0.0;
       if (lum < 0.85) ink = max(ink, 1.0 - smoothstep(0.0, 0.45, hatch(px, 0.785, sp)));
@@ -504,7 +500,7 @@ export const EFFECTS: Effect[] = [
     ],
     glsl: `
     vec3 effect(vec2 uv){
-      float l = dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114));
+      float l = lumAt(uv);
       return l < 0.5 ? mix(uShadow, uMid, l*2.0) : mix(uMid, uHigh, (l-0.5)*2.0);
     }`,
   },
@@ -522,7 +518,7 @@ export const EFFECTS: Effect[] = [
     ],
     glsl: `
     vec3 effect(vec2 uv){
-      float l = dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114));
+      float l = lumAt(uv);
       return mix(uDark, uLight, smoothstep(uThreshold - uKnee, uThreshold + uKnee, l));
     }`,
   },
@@ -568,12 +564,11 @@ export const EFFECTS: Effect[] = [
       color("uBg", "Background", "#05060a"),
     ],
     glsl: `
-    float lum(vec2 uv){ return dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114)); }
     vec3 effect(vec2 uv){
       vec2 t = 1.0 / uResolution;
-      float tl=lum(uv+t*vec2(-1,-1)), l=lum(uv+t*vec2(-1,0)), bl=lum(uv+t*vec2(-1,1));
-      float tr=lum(uv+t*vec2(1,-1)),  r=lum(uv+t*vec2(1,0)),  br=lum(uv+t*vec2(1,1));
-      float tm=lum(uv+t*vec2(0,-1)),  bm=lum(uv+t*vec2(0,1));
+      float tl=lumAt(uv+t*vec2(-1,-1)), l=lumAt(uv+t*vec2(-1,0)), bl=lumAt(uv+t*vec2(-1,1));
+      float tr=lumAt(uv+t*vec2(1,-1)),  r=lumAt(uv+t*vec2(1,0)),  br=lumAt(uv+t*vec2(1,1));
+      float tm=lumAt(uv+t*vec2(0,-1)),  bm=lumAt(uv+t*vec2(0,1));
       float gx = -tl - 2.0*l - bl + tr + 2.0*r + br;
       float gy = -tl - 2.0*tm - tr + bl + 2.0*bm + br;
       float e = clamp(length(vec2(gx,gy)) * uStrength, 0.0, 1.0);
@@ -590,11 +585,11 @@ export const EFFECTS: Effect[] = [
     glsl: `
     vec3 effect(vec2 uv){
       vec2 t = (1.0 + uRadius) / uResolution;
-      float g = dot(texture(uTexture, uv).rgb, vec3(0.299,0.587,0.114));
+      float g = lumAt(uv);
       float inv = 0.0; float w = 0.0;
       for (int x=-2; x<=2; x++){
         for (int y=-2; y<=2; y++){
-          inv += 1.0 - dot(texture(uTexture, uv + t*vec2(float(x),float(y))).rgb, vec3(0.299,0.587,0.114));
+          inv += 1.0 - lumAt(uv + t*vec2(float(x),float(y)));
           w += 1.0;
         }
       }
@@ -618,7 +613,7 @@ export const EFFECTS: Effect[] = [
     vec3 effect(vec2 uv){
       vec2 dir = vec2(cos(uAngle*6.2831853), sin(uAngle*6.2831853)) / uResolution * (1.0 + uStrength);
       vec3 e = (texture(uTexture, uv+dir).rgb - texture(uTexture, uv-dir).rgb) + 0.5;
-      if (uGray > 0.5) return vec3(dot(e, vec3(0.299,0.587,0.114)));
+      if (uGray > 0.5) return vec3(luma(e));
       return e;
     }`,
   },
@@ -630,7 +625,6 @@ export const EFFECTS: Effect[] = [
     blurb: "CMYK angled dot screens — true print color.",
     controls: [slider("uCell", "Cell size", 3, 24, 0.5, 7)],
     glsl: `
-    mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
     float screen(vec2 uv, float angle, float value){
       vec2 px = uv * uResolution;
       vec2 rp = rot(radians(angle)) * px;
@@ -667,18 +661,167 @@ export const EFFECTS: Effect[] = [
       slider("uWarm", "Warmth", 0, 1, 0.01, 0.3),
     ],
     glsl: `
-    float hash(vec2 p){
-      p = fract(p * vec2(123.34, 456.21));
-      p += dot(p, p + 45.32);
-      return fract(p.x * p.y);
-    }
     vec3 effect(vec2 uv){
       vec3 c = texture(uTexture, uv).rgb;
-      float g = hash(uv * uResolution + fract(uTime) * 431.0);
+      float g = hash21(uv * uResolution + fract(uTime) * 431.0);
       c += (g - 0.5) * uGrain * 0.5;
       c += vec3(uWarm * 0.06, 0.0, -uWarm * 0.04);
       c *= clamp(1.0 - uVignette * dot(uv - 0.5, uv - 0.5) * 2.0, 0.0, 1.0);
       return clamp(c, 0.0, 1.0);
+    }`,
+  },
+
+  {
+    id: "swirl",
+    name: "Swirl",
+    category: "Distort",
+    blurb: "Twist the image around its center.",
+    controls: [
+      slider("uAmount", "Twist", -10, 10, 0.1, 3),
+      slider("uRadius", "Radius", 0.1, 1, 0.01, 0.5),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 asp = vec2(uResolution.x / uResolution.y, 1.0);
+      vec2 p = (uv - 0.5) * asp;
+      float r = length(p);
+      float falloff = smoothstep(uRadius, 0.0, r);
+      float a = atan(p.y, p.x) + uAmount * falloff;
+      vec2 q = vec2(cos(a), sin(a)) * r / asp + 0.5;
+      return texture(uTexture, clamp(q, 0.0, 1.0)).rgb;
+    }`,
+  },
+
+  {
+    id: "fisheye",
+    name: "Fisheye",
+    category: "Distort",
+    blurb: "Barrel / pincushion lens bulge.",
+    controls: [slider("uAmount", "Bulge", -1, 1, 0.01, 0.5)],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 p = uv * 2.0 - 1.0;
+      float r = length(p);
+      float k = 1.0 + uAmount * r * r;
+      vec2 q = p / k * (1.0 + uAmount) * 0.5 + 0.5;
+      if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return vec3(0.0);
+      return texture(uTexture, q).rgb;
+    }`,
+  },
+
+  {
+    id: "mirror",
+    name: "Mirror",
+    category: "Geometric",
+    blurb: "Reflect across a movable axis.",
+    controls: [
+      slider("uPos", "Axis position", 0, 1, 0.005, 0.5),
+      toggle("uVertical", "Vertical axis", 1),
+      toggle("uFlip", "Flip side", 0),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      float t = uVertical > 0.5 ? uv.x : uv.y;
+      bool second = uFlip > 0.5 ? t < uPos : t > uPos;
+      if (second) t = 2.0 * uPos - t;
+      t = clamp(t, 0.0, 1.0);
+      vec2 q = uVertical > 0.5 ? vec2(t, uv.y) : vec2(uv.x, t);
+      return texture(uTexture, q).rgb;
+    }`,
+  },
+
+  {
+    id: "hexpixel",
+    name: "Hex Pixel",
+    category: "Pixel",
+    blurb: "Mosaic of hexagonal tiles.",
+    controls: [
+      slider("uSize", "Hex size", 4, 60, 1, 16),
+      slider("uEdge", "Grout", 0, 1, 0.01, 0),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec2 px = uv * uResolution / uSize;
+      vec2 s = vec2(1.0, 1.7320508);
+      vec2 a = mod(px, s) - s * 0.5;
+      vec2 b = mod(px - s * 0.5, s) - s * 0.5;
+      vec2 gv = dot(a, a) < dot(b, b) ? a : b;
+      vec2 cen = (px - gv) * uSize / uResolution;
+      vec3 c = texture(uTexture, clamp(cen, 0.0, 1.0)).rgb;
+      float d = max(abs(gv.x), dot(abs(gv), normalize(vec2(1.0, 1.7320508))));
+      c *= 1.0 - uEdge * smoothstep(0.42, 0.5, d);
+      return c;
+    }`,
+  },
+
+  {
+    id: "thermal",
+    name: "Thermal",
+    category: "Color",
+    blurb: "False-color infrared-camera palette.",
+    controls: [
+      slider("uGain", "Gain", 0.5, 2, 0.01, 1),
+      toggle("uBands", "Banding", 0),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      float l = clamp(lumAt(uv) * uGain, 0.0, 1.0);
+      if (uBands > 0.5) l = floor(l * 8.0) / 7.0;
+      vec3 c = l < 0.25 ? mix(vec3(0.0,0.0,0.2), vec3(0.1,0.0,0.6), l*4.0)
+             : l < 0.5  ? mix(vec3(0.1,0.0,0.6), vec3(0.9,0.1,0.2), (l-0.25)*4.0)
+             : l < 0.75 ? mix(vec3(0.9,0.1,0.2), vec3(1.0,0.7,0.0), (l-0.5)*4.0)
+                        : mix(vec3(1.0,0.7,0.0), vec3(1.0,1.0,0.9), (l-0.75)*4.0);
+      return c;
+    }`,
+  },
+
+  {
+    id: "blur",
+    name: "Blur",
+    category: "Tone",
+    blurb: "Soft gaussian blur (separable two-pass).",
+    controls: [slider("uRadius", "Radius", 0, 16, 0.5, 4)],
+    passes: [blur1D("vec2(1.0, 0.0)"), blur1D("vec2(0.0, 1.0)")],
+  },
+
+  {
+    id: "vhs",
+    name: "VHS",
+    category: "Glitch",
+    blurb: "Tape wobble, tracking noise & chroma smear.",
+    animated: true,
+    controls: [
+      slider("uWobble", "Wobble", 0, 1, 0.01, 0.3),
+      slider("uNoise", "Tracking noise", 0, 1, 0.01, 0.35),
+      slider("uSmear", "Chroma smear", 0, 8, 0.1, 2.5),
+    ],
+    glsl: `
+    vec3 effect(vec2 uv){
+      float wob = sin(uv.y * 320.0 + uTime * 12.0) * 0.0012 * uWobble
+                + sin(uv.y * 7.0 + uTime * 2.3) * 0.003 * uWobble;
+      vec2 p = vec2(uv.x + wob, uv.y);
+      vec2 o = vec2(uSmear / uResolution.x, 0.0);
+      vec3 c = vec3(texture(uTexture, p + o).r, texture(uTexture, p).g, texture(uTexture, p - o).b);
+      float band = step(0.985, hash21(vec2(floor(uv.y * 240.0), floor(uTime * 14.0))));
+      float n = hash21(uv * uResolution + fract(uTime) * 913.0);
+      c = mix(c, vec3(n), band * uNoise);
+      c += (n - 0.5) * 0.06 * uNoise;
+      float head = smoothstep(0.06, 0.0, uv.y) * uNoise;
+      c = mix(c, vec3(hash21(vec2(uv.x * 90.0, uTime * 20.0))), head * 0.6);
+      return clamp(c, 0.0, 1.0);
+    }`,
+  },
+
+  {
+    id: "invert",
+    name: "Invert",
+    category: "Color",
+    blurb: "Negative, with a mix amount.",
+    controls: [slider("uAmount", "Amount", 0, 1, 0.01, 1)],
+    glsl: `
+    vec3 effect(vec2 uv){
+      vec3 c = texture(uTexture, uv).rgb;
+      return mix(c, 1.0 - c, uAmount);
     }`,
   },
 ];

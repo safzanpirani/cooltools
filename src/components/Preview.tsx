@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Renderer } from "../gl/renderer";
+import { Renderer, setCurrentRenderer } from "../gl/renderer";
 import { EFFECT_BY_ID } from "../effects/list";
 import { fitToCanvas, useStore } from "../store";
 
@@ -23,6 +23,7 @@ export function Preview() {
       return;
     }
     rendererRef.current = renderer;
+    setCurrentRenderer(renderer);
 
     // re-render on any state change; keep animating while an effect uses time
     const unsub = useStore.subscribe(() => {
@@ -57,6 +58,7 @@ export function Preview() {
     return () => {
       unsub();
       cancelAnimationFrame(raf);
+      setCurrentRenderer(null);
     };
   }, []);
 

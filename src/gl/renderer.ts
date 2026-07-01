@@ -16,7 +16,25 @@ out vec4 outColor;
 uniform sampler2D uTexture;
 void main(){ outColor = texture(uTexture, vTexCoord); }`;
 
-function buildFrag(effect: Effect): string {
+// shared helpers available to every effect's GLSL
+const PRELUDE = `
+const vec3 LW = vec3(0.299, 0.587, 0.114);
+float luma(vec3 c){ return dot(c, LW); }
+float lumAt(vec2 uv){ return luma(texture(uTexture, uv).rgb); }
+float hash11(float n){ return fract(sin(n*78.233)*43758.5453); }
+float hash21(vec2 p){
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+`;
+
+function passBodies(effect: Effect): string[] {
+  return effect.passes ?? [effect.glsl!];
+}
+
+function buildFrag(effect: Effect, body: string): string {
   const decls = effect.controls
     .map((c) =>
       c.type === "color"
@@ -32,7 +50,8 @@ uniform sampler2D uTexture;
 uniform vec2 uResolution;
 uniform float uTime;
 ${decls}
-${effect.glsl}
+${PRELUDE}
+${body}
 void main(){ outColor = vec4(effect(vTexCoord), 1.0); }`;
 }
 
@@ -56,6 +75,16 @@ interface Program {
   resources: EffectResources | null;
 }
 
+// current renderer instance, so UI code (e.g. PNG export) can force a
+// synchronous re-render — the canvas is created without preserveDrawingBuffer
+let current: Renderer | null = null;
+export function getCurrentRenderer(): Renderer | null {
+  return current;
+}
+export function setCurrentRenderer(r: Renderer | null) {
+  current = r;
+}
+
 export class Renderer {
   private gl: WebGL2RenderingContext;
   private vao: WebGLVertexArrayObject;
@@ -64,17 +93,19 @@ export class Renderer {
   private srcTex: WebGLTexture | null = null;
   private fbos: [WebGLFramebuffer, WebGLFramebuffer] | null = null;
   private texs: [WebGLTexture, WebGLTexture] | null = null;
+  // half-float intermediates avoid 8-bit quantization between chained passes
+  private halfFloat: boolean;
   width = 0;
   height = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     const gl = canvas.getContext("webgl2", {
-      preserveDrawingBuffer: true,
       premultipliedAlpha: false,
       antialias: false,
     });
     if (!gl) throw new Error("WebGL2 not supported");
     this.gl = gl;
+    this.halfFloat = !!gl.getExtension("EXT_color_buffer_float");
 
     // fullscreen quad
     const buf = gl.createBuffer()!;
@@ -124,11 +155,16 @@ export class Renderer {
     return { prog, locs: new Map(), resources };
   }
 
-  private programFor(effect: Effect): Program {
-    let p = this.programs.get(effect.id);
+  private programFor(effect: Effect, passIdx: number): Program {
+    const key = `${effect.id}#${passIdx}`;
+    let p = this.programs.get(key);
     if (!p) {
-      p = this.compile(buildFrag(effect), effect);
-      this.programs.set(effect.id, p);
+      // one-time resources are owned by pass 0
+      p = this.compile(
+        buildFrag(effect, passBodies(effect)[passIdx]),
+        passIdx === 0 ? effect : null,
+      );
+      this.programs.set(key, p);
     }
     return p;
   }
@@ -166,7 +202,17 @@ export class Renderer {
     }
     for (let i = 0; i < 2; i++) {
       gl.bindTexture(gl.TEXTURE_2D, this.texs![i]);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        this.halfFloat ? gl.RGBA16F : gl.RGBA,
+        w,
+        h,
+        0,
+        gl.RGBA,
+        this.halfFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE,
+        null,
+      );
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos![i]);
       gl.framebufferTexture2D(
         gl.FRAMEBUFFER,
@@ -197,13 +243,14 @@ export class Renderer {
 
   private pass(
     node: PipelineNode,
+    passIdx: number,
     readTex: WebGLTexture,
     target: WebGLFramebuffer | null,
     time: number,
   ) {
     const gl = this.gl;
     const effect = EFFECT_BY_ID[node.effectId];
-    const p = this.programFor(effect);
+    const p = this.programFor(effect, passIdx);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, target);
     gl.viewport(0, 0, this.width, this.height);
@@ -256,19 +303,25 @@ export class Renderer {
 
   render(pipeline: PipelineNode[], time: number) {
     if (!this.srcTex) return;
-    const active = pipeline.filter(
-      (n) => n.enabled && EFFECT_BY_ID[n.effectId],
-    );
+    const active = pipeline.filter((n) => n.enabled && EFFECT_BY_ID[n.effectId]);
     if (active.length === 0) {
       this.blit(this.srcTex);
       return;
     }
+    // expand nodes into (node, passIdx) draw calls
+    const draws = active.flatMap((node) =>
+      passBodies(EFFECT_BY_ID[node.effectId]).map((_, passIdx) => ({ node, passIdx })),
+    );
     let read = this.srcTex;
-    for (let i = 0; i < active.length; i++) {
-      const last = i === active.length - 1;
-      const target = last ? null : this.fbos![i % 2];
-      this.pass(active[i], read, target, time);
-      if (!last) read = this.texs![i % 2];
+    let w = 0;
+    for (let i = 0; i < draws.length; i++) {
+      const last = i === draws.length - 1;
+      const target = last ? null : this.fbos![w];
+      this.pass(draws[i].node, draws[i].passIdx, read, target, time);
+      if (!last) {
+        read = this.texs![w];
+        w = 1 - w;
+      }
     }
   }
 }

@@ -3,6 +3,7 @@ import { CATEGORIES, EFFECTS, EFFECT_BY_ID } from "../effects/list";
 import { encodeState, fitToCanvas, useStore } from "../store";
 import { PRESETS } from "../presets";
 import { Controls } from "./Controls";
+import { getCurrentRenderer } from "../gl/renderer";
 
 export function Sidebar() {
   const pipeline = useStore((s) => s.pipeline);
@@ -42,6 +43,8 @@ export function Sidebar() {
   function exportPNG() {
     const c = document.getElementById("glcanvas") as HTMLCanvasElement | null;
     if (!c) return;
+    // no preserveDrawingBuffer — render fresh so toBlob snapshots a live frame
+    getCurrentRenderer()?.render(useStore.getState().pipeline, performance.now() / 1000);
     c.toBlob((blob) => {
       if (!blob) return;
       const a = document.createElement("a");

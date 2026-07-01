@@ -56,6 +56,28 @@ export const PRESETS: Preset[] = [
     nodes: [{ effectId: "stipple", params: { uCell: 5 } }],
   },
   {
+    name: "VHS Tape",
+    nodes: [
+      { effectId: "vhs" },
+      { effectId: "adjust", params: { uSaturation: 1.2, uContrast: 1.1 } },
+      { effectId: "film", params: { uGrain: 0.25, uVignette: 0.5, uWarm: 0.2 } },
+    ],
+  },
+  {
+    name: "Predator",
+    nodes: [
+      { effectId: "blur", params: { uRadius: 2 } },
+      { effectId: "thermal", params: { uBands: 1 } },
+    ],
+  },
+  {
+    name: "Funhouse",
+    nodes: [
+      { effectId: "fisheye", params: { uAmount: 0.6 } },
+      { effectId: "swirl", params: { uAmount: 2, uRadius: 0.6 } },
+    ],
+  },
+  {
     name: "Oil",
     nodes: [
       { effectId: "kuwahara", params: { uRadius: 6 } },

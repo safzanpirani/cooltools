@@ -53,8 +53,12 @@ export interface Effect {
   // true if the effect uses uTime — render loop keeps animating it
   animated?: boolean;
   // GLSL body: helper fns + `vec3 effect(vec2 uv)`. May read uTexture,
-  // uResolution, uTime and any control uniform.
-  glsl: string;
+  // uResolution, uTime and any control uniform. Shared helpers from the
+  // renderer's PRELUDE (luma, lumAt, hash11, hash21, rot, LW) are available.
+  glsl?: string;
+  // multi-pass variant: each entry is a full GLSL body; passes run in order
+  // through the ping-pong targets, sharing the same control uniforms.
+  passes?: string[];
   // optional one-time GPU resources (e.g. a glyph atlas)
   resources?: (gl: WebGL2RenderingContext) => EffectResources;
 }
