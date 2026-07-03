@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
 import { CATEGORIES, EFFECTS, EFFECT_BY_ID } from "../effects/list";
 import { encodeState, fitToCanvas, useStore } from "../store";
-import { PRESETS } from "../presets";
 import { Controls } from "./Controls";
+import { PresetThumbs } from "./PresetThumbs";
 import { getCurrentRenderer } from "../gl/renderer";
 import { isRecording, startRecording, stopRecording } from "../recorder";
 
@@ -26,6 +26,9 @@ export function Sidebar() {
   const startAudio = useStore((s) => s.startAudio);
   const stopAudio = useStore((s) => s.stopAudio);
   const seed = useStore((s) => s.seed);
+  const compare = useStore((s) => s.compare);
+  const setCompare = useStore((s) => s.setCompare);
+  const loadVideo = useStore((s) => s.loadVideo);
   const fileRef = useRef<HTMLInputElement>(null);
   const [toast, setToast] = useState("");
   const [rec, setRec] = useState(false);
@@ -36,7 +39,12 @@ export function Sidebar() {
   }
 
   function onUpload(file?: File) {
-    if (!file || !file.type.startsWith("image/")) return;
+    if (!file) return;
+    if (file.type.startsWith("video/")) {
+      loadVideo(file).catch(() => flash("could not play video"));
+      return;
+    }
+    if (!file.type.startsWith("image/")) return;
     const img = new Image();
     img.onload = () => {
       const { el, w, h } = fitToCanvas(img, img.naturalWidth, img.naturalHeight);
@@ -58,6 +66,18 @@ export function Sidebar() {
       a.download = `cooltools-${Date.now()}.png`;
       a.click();
       URL.revokeObjectURL(a.href);
+    }, "image/png");
+  }
+
+  function copyPNG() {
+    const c = document.getElementById("glcanvas") as HTMLCanvasElement | null;
+    if (!c || typeof ClipboardItem === "undefined") return flash("clipboard unsupported");
+    getCurrentRenderer()?.render(useStore.getState().pipeline, performance.now() / 1000);
+    c.toBlob((blob) => {
+      if (!blob) return;
+      navigator.clipboard
+        .write([new ClipboardItem({ "image/png": blob })])
+        .then(() => flash("copied to clipboard"), () => flash("copy failed"));
     }, "image/png");
   }
 
@@ -131,8 +151,18 @@ export function Sidebar() {
           </button>
         )}
         <button onClick={exportPNG}>↓ png</button>
+        <button title="copy result to clipboard (paste an image to load one)" onClick={copyPNG}>
+          ⧉ copy
+        </button>
         <button className={rec ? "cam-on" : ""} onClick={toggleRecord}>
           {rec ? "■ stop rec" : "● rec"}
+        </button>
+        <button
+          className={compare !== null ? "cam-on" : ""}
+          title="before/after split — drag the divider"
+          onClick={() => setCompare(compare === null ? 0.5 : null)}
+        >
+          ⇔ compare
         </button>
         <button onClick={share}>⟴ share</button>
         <button title="seeded random chain" onClick={() => surprise()}>
@@ -156,20 +186,14 @@ export function Sidebar() {
         <input
           ref={fileRef}
           type="file"
-          accept="image/*"
+          accept="image/*,video/*"
           hidden
           onChange={(e) => onUpload(e.target.files?.[0])}
         />
       </div>
 
       <div className="section-title">presets</div>
-      <div className="presets">
-        {PRESETS.map((p) => (
-          <button key={p.name} onClick={() => applyPreset(p)}>
-            {p.name}
-          </button>
-        ))}
-      </div>
+      <PresetThumbs onPick={applyPreset} />
 
       <div className="section-title">
         pipeline <span className="muted">{pipeline.length} effect{pipeline.length === 1 ? "" : "s"}</span>

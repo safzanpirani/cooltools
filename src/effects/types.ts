@@ -67,14 +67,40 @@ export type ParamValue = number | string;
 
 // frequency band a slider param can be linked to when the mic is live
 export type AudioBand = "level" | "bass" | "mid" | "treble";
+// a param can also be driven by a time-based oscillator (no mic needed)
+export type ModSource = AudioBand | "sine" | "saw";
+
+export interface MaskParams {
+  type: number; // 0 off, 1 radial, 2 linear
+  cx: number; // 0..1
+  cy: number; // 0..1
+  size: number; // 0..1
+  feather: number; // 0..0.5
+  angle: number; // degrees, linear only
+  invert: number; // 0 | 1
+}
+
+export const defaultMask = (): MaskParams => ({
+  type: 0,
+  cx: 0.5,
+  cy: 0.5,
+  size: 0.35,
+  feather: 0.15,
+  angle: 0,
+  invert: 0,
+});
 
 export interface PipelineNode {
   uid: string;
   effectId: string;
   enabled: boolean;
   params: Record<string, ParamValue>;
-  // slider uniform -> audio band driving it
-  mods?: Record<string, AudioBand>;
+  // slider uniform -> mod source driving it
+  mods?: Record<string, ModSource>;
+  // GLSL body override (custom shader node only)
+  code?: string;
+  // limits where the effect applies
+  mask?: MaskParams;
 }
 
 // helpers for terse control declarations

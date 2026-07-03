@@ -1,0 +1,17 @@
+{
+  "name": "cooltools — live image effects",
+  "short_name": "cooltools",
+  "description": "Stack lo-fi image effects (dither, halftone, ASCII, CRT, glitch) live in your browser.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0b0e",
+  "theme_color": "#0a0b0e",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

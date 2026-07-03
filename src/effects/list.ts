@@ -16,6 +16,17 @@ const blur1D = (dir: string) => `
       return sum / wsum;
     }`;
 
+// starter body for the custom shader node — editable per pipeline node
+export const CUSTOM_DEFAULT = `vec3 effect(vec2 uv){
+  // uA, uB, uC sliders (0..1) · uTime · uResolution · uTexture
+  // helpers: luma(c), lumAt(uv), hash11(f), hash21(v2), rot(a)
+  vec2 p = uv - 0.5;
+  p *= rot(uA * 6.2831);
+  vec3 c = texture(uTexture, p + 0.5).rgb;
+  c = mix(c, c.bgr, uB);
+  return c * (1.0 - uC * length(p) * 2.0);
+}`;
+
 export const EFFECTS: Effect[] = [
   {
     id: "adjust",
@@ -823,6 +834,19 @@ export const EFFECTS: Effect[] = [
       vec3 c = texture(uTexture, uv).rgb;
       return mix(c, 1.0 - c, uAmount);
     }`,
+  },
+
+  {
+    id: "custom",
+    name: "Custom GLSL",
+    category: "Custom",
+    blurb: "Write your own effect(uv) — uA/uB/uC sliders, uTime, PRELUDE helpers.",
+    controls: [
+      slider("uA", "uA", 0, 1, 0.01, 0.5),
+      slider("uB", "uB", 0, 1, 0.01, 0.5),
+      slider("uC", "uC", 0, 1, 0.01, 0.5),
+    ],
+    glsl: CUSTOM_DEFAULT,
   },
 ];
 

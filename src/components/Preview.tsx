@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Renderer, setCurrentRenderer } from "../gl/renderer";
 import { EFFECT_BY_ID } from "../effects/list";
 import { fitToCanvas, useStore } from "../store";
-import { applyAudioMods, getBands } from "../audio";
+import { applyMods, getBands, hasLfoMods } from "../audio";
 import { isRecording } from "../recorder";
 
 export function Preview() {
@@ -11,8 +11,12 @@ export function Preview() {
   const dirty = useRef(true);
   const source = useStore((s) => s.source);
   const setSource = useStore((s) => s.setSource);
+  const loadVideo = useStore((s) => s.loadVideo);
+  const compare = useStore((s) => s.compare);
+  const setCompare = useStore((s) => s.setCompare);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
 
   // init renderer + render loop
   useEffect(() => {
@@ -35,7 +39,7 @@ export function Preview() {
     let raf = 0;
     const start = performance.now();
     const loop = () => {
-      const { pipeline, source, audioOn } = useStore.getState();
+      const { pipeline, source, audioOn, compare } = useStore.getState();
       const live = source?.live === true;
       if (live) {
         renderer.updateSource(source.el);
@@ -45,12 +49,20 @@ export function Preview() {
         live ||
         audioOn ||
         isRecording() ||
-        pipeline.some((n) => n.enabled && EFFECT_BY_ID[n.effectId]?.animated);
+        hasLfoMods(pipeline) ||
+        pipeline.some(
+          (n) =>
+            n.enabled &&
+            (EFFECT_BY_ID[n.effectId]?.animated || n.code?.includes("uTime")),
+        );
       if (dirty.current || animated) {
         const t = (performance.now() - start) / 1000;
-        const frame = audioOn ? applyAudioMods(pipeline, getBands()) : pipeline;
+        const frame =
+          audioOn || hasLfoMods(pipeline)
+            ? applyMods(pipeline, getBands(), t)
+            : pipeline;
         try {
-          renderer.render(frame, t);
+          renderer.render(frame, t, compare);
           setError(null);
         } catch (e) {
           setError(String(e));
@@ -76,6 +88,10 @@ export function Preview() {
   }, [source]);
 
   function loadFile(file: File) {
+    if (file.type.startsWith("video/")) {
+      loadVideo(file).catch(() => setError("could not play video"));
+      return;
+    }
     if (!file.type.startsWith("image/")) return;
     const img = new Image();
     img.onload = () => {
@@ -84,6 +100,36 @@ export function Preview() {
       URL.revokeObjectURL(img.src);
     };
     img.src = URL.createObjectURL(file);
+  }
+
+  // paste image from clipboard anywhere on the page
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const item = [...(e.clipboardData?.items ?? [])].find((i) =>
+        i.type.startsWith("image/"),
+      );
+      const f = item?.getAsFile();
+      if (f) loadFile(f);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function dragSplit(e: React.PointerEvent) {
+    if (compare === null) return;
+    const rect = wrapRef.current!.getBoundingClientRect();
+    const move = (ev: PointerEvent) => {
+      const v = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+      setCompare(v);
+    };
+    move(e.nativeEvent);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   return (
@@ -101,7 +147,18 @@ export function Preview() {
         if (f) loadFile(f);
       }}
     >
-      <canvas id="glcanvas" ref={canvasRef} />
+      <div
+        ref={wrapRef}
+        className={`canvas-wrap ${compare !== null ? "comparing" : ""}`}
+        onPointerDown={dragSplit}
+      >
+        <canvas id="glcanvas" ref={canvasRef} />
+        {compare !== null && (
+          <div className="split-handle" style={{ left: `${compare * 100}%` }}>
+            <span>⇔</span>
+          </div>
+        )}
+      </div>
       {source && (
         <div className="badge">
           {source.name} · {source.w}×{source.h}

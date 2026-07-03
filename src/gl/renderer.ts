@@ -16,6 +16,49 @@ out vec4 outColor;
 uniform sampler2D uTexture;
 void main(){ outColor = texture(uTexture, vTexCoord); }`;
 
+// split-wipe: original left of uSplit, effected right, thin divider line
+const COMPARE = `#version 300 es
+precision highp float;
+in vec2 vTexCoord;
+out vec4 outColor;
+uniform sampler2D uTexture;
+uniform sampler2D uOriginal;
+uniform float uSplit;
+uniform vec2 uResolution;
+void main(){
+  vec4 c = vTexCoord.x < uSplit
+    ? texture(uOriginal, vTexCoord)
+    : texture(uTexture, vTexCoord);
+  float line = 1.0 - smoothstep(0.0, 1.5 / uResolution.x, abs(vTexCoord.x - uSplit));
+  outColor = mix(c, vec4(1.0), line * 0.8);
+}`;
+
+// blends node input (uOriginal) with node output (uTexture) by a mask
+const MASK_MIX = `#version 300 es
+precision highp float;
+in vec2 vTexCoord;
+out vec4 outColor;
+uniform sampler2D uTexture;
+uniform sampler2D uOriginal;
+uniform vec2 uResolution;
+uniform float uMaskType, uCx, uCy, uSize, uFeather, uAngle, uInvert;
+void main(){
+  vec2 uv = vTexCoord;
+  float f = max(uFeather, 0.001);
+  float m;
+  if (uMaskType < 1.5) {
+    vec2 p = uv - vec2(uCx, 1.0 - uCy);
+    p.x *= uResolution.x / uResolution.y;
+    m = 1.0 - smoothstep(uSize - f, uSize + f, length(p));
+  } else {
+    float a = radians(uAngle);
+    float d = dot(uv - vec2(uCx, 1.0 - uCy), vec2(cos(a), sin(a)));
+    m = 1.0 - smoothstep(-f, f, d);
+  }
+  if (uInvert > 0.5) m = 1.0 - m;
+  outColor = mix(texture(uOriginal, uv), texture(uTexture, uv), m);
+}`;
+
 // shared helpers available to every effect's GLSL
 const PRELUDE = `
 const vec3 LW = vec3(0.299, 0.587, 0.114);
@@ -30,8 +73,21 @@ float hash21(vec2 p){
 mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
 `;
 
-function passBodies(effect: Effect): string[] {
+function passBodies(effect: Effect, code?: string): string[] {
+  if (code !== undefined) return [code];
   return effect.passes ?? [effect.glsl!];
+}
+
+function hashStr(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+// compile errors for custom shader bodies, keyed by code hash
+const shaderErrors = new Map<string, string>();
+export function getShaderError(code: string): string | null {
+  return shaderErrors.get(hashStr(code)) ?? null;
 }
 
 function buildFrag(effect: Effect, body: string): string {
@@ -90,9 +146,14 @@ export class Renderer {
   private vao: WebGLVertexArrayObject;
   private programs = new Map<string, Program>();
   private passthrough: Program;
+  private comparer: Program;
+  private masker: Program;
   private srcTex: WebGLTexture | null = null;
   private fbos: [WebGLFramebuffer, WebGLFramebuffer] | null = null;
   private texs: [WebGLTexture, WebGLTexture] | null = null;
+  // snapshot of a node's input while its passes run, for mask compositing
+  private maskFbo: WebGLFramebuffer | null = null;
+  private maskTex: WebGLTexture | null = null;
   // half-float intermediates avoid 8-bit quantization between chained passes
   private halfFloat: boolean;
   width = 0;
@@ -122,6 +183,8 @@ export class Renderer {
     gl.bindVertexArray(null);
 
     this.passthrough = this.compile(PASSTHROUGH, null);
+    this.comparer = this.compile(COMPARE, null);
+    this.masker = this.compile(MASK_MIX, null);
   }
 
   private compileShader(type: number, src: string): WebGLShader {
@@ -155,15 +218,31 @@ export class Renderer {
     return { prog, locs: new Map(), resources };
   }
 
-  private programFor(effect: Effect, passIdx: number): Program {
-    const key = `${effect.id}#${passIdx}`;
+  private programFor(effect: Effect, passIdx: number, code?: string): Program {
+    const key =
+      code !== undefined
+        ? `${effect.id}@${hashStr(code)}#${passIdx}`
+        : `${effect.id}#${passIdx}`;
     let p = this.programs.get(key);
     if (!p) {
-      // one-time resources are owned by pass 0
-      p = this.compile(
-        buildFrag(effect, passBodies(effect)[passIdx]),
-        passIdx === 0 ? effect : null,
-      );
+      const body = passBodies(effect, code)[passIdx];
+      if (code !== undefined) {
+        // custom bodies come from user input: fall back to passthrough on
+        // compile failure and surface the error instead of killing the loop
+        try {
+          p = this.compile(buildFrag(effect, body), null);
+          shaderErrors.delete(hashStr(code));
+        } catch (e) {
+          shaderErrors.set(hashStr(code), String(e).split("\n")[0]);
+          p = this.compile(
+            buildFrag(effect, `vec3 effect(vec2 uv){ return texture(uTexture, uv).rgb; }`),
+            null,
+          );
+        }
+      } else {
+        // one-time resources are owned by pass 0
+        p = this.compile(buildFrag(effect, body), passIdx === 0 ? effect : null);
+      }
       this.programs.set(key, p);
     }
     return p;
@@ -199,9 +278,11 @@ export class Renderer {
     if (!this.fbos) {
       this.fbos = [gl.createFramebuffer()!, gl.createFramebuffer()!];
       this.texs = [this.makeTex(), this.makeTex()];
+      this.maskFbo = gl.createFramebuffer();
+      this.maskTex = this.makeTex();
     }
-    for (let i = 0; i < 2; i++) {
-      gl.bindTexture(gl.TEXTURE_2D, this.texs![i]);
+    const attach = (fbo: WebGLFramebuffer, tex: WebGLTexture) => {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texImage2D(
         gl.TEXTURE_2D,
         0,
@@ -213,15 +294,11 @@ export class Renderer {
         this.halfFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE,
         null,
       );
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos![i]);
-      gl.framebufferTexture2D(
-        gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
-        gl.TEXTURE_2D,
-        this.texs![i],
-        0,
-      );
-    }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    };
+    for (let i = 0; i < 2; i++) attach(this.fbos![i], this.texs![i]);
+    attach(this.maskFbo!, this.maskTex!);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
@@ -250,7 +327,7 @@ export class Renderer {
   ) {
     const gl = this.gl;
     const effect = EFFECT_BY_ID[node.effectId];
-    const p = this.programFor(effect, passIdx);
+    const p = this.programFor(effect, passIdx, node.code);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, target);
     gl.viewport(0, 0, this.width, this.height);
@@ -289,9 +366,9 @@ export class Renderer {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  private blit(tex: WebGLTexture) {
+  private blit(tex: WebGLTexture, target: WebGLFramebuffer | null = null) {
     const gl = this.gl;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
     gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.passthrough.prog);
     gl.bindVertexArray(this.vao);
@@ -301,27 +378,77 @@ export class Renderer {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  render(pipeline: PipelineNode[], time: number) {
+  // mix node input (maskTex) with node output (read) by the node's mask
+  private maskPass(node: PipelineNode, read: WebGLTexture, target: WebGLFramebuffer) {
+    const gl = this.gl;
+    const p = this.masker;
+    const m = node.mask!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(p.prog);
+    gl.bindVertexArray(this.vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, read);
+    gl.uniform1i(this.loc(p, "uTexture"), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.maskTex!);
+    gl.uniform1i(this.loc(p, "uOriginal"), 1);
+    gl.uniform2f(this.loc(p, "uResolution"), this.width, this.height);
+    gl.uniform1f(this.loc(p, "uMaskType"), m.type);
+    gl.uniform1f(this.loc(p, "uCx"), m.cx);
+    gl.uniform1f(this.loc(p, "uCy"), m.cy);
+    gl.uniform1f(this.loc(p, "uSize"), m.size);
+    gl.uniform1f(this.loc(p, "uFeather"), m.feather);
+    gl.uniform1f(this.loc(p, "uAngle"), m.angle);
+    gl.uniform1f(this.loc(p, "uInvert"), m.invert);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  private comparePass(result: WebGLTexture, split: number) {
+    const gl = this.gl;
+    const p = this.comparer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(p.prog);
+    gl.bindVertexArray(this.vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, result);
+    gl.uniform1i(this.loc(p, "uTexture"), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.srcTex!);
+    gl.uniform1i(this.loc(p, "uOriginal"), 1);
+    gl.uniform1f(this.loc(p, "uSplit"), split);
+    gl.uniform2f(this.loc(p, "uResolution"), this.width, this.height);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  render(pipeline: PipelineNode[], time: number, split: number | null = null) {
     if (!this.srcTex) return;
     const active = pipeline.filter((n) => n.enabled && EFFECT_BY_ID[n.effectId]);
     if (active.length === 0) {
-      this.blit(this.srcTex);
+      if (split !== null) this.comparePass(this.srcTex, split);
+      else this.blit(this.srcTex);
       return;
     }
-    // expand nodes into (node, passIdx) draw calls
-    const draws = active.flatMap((node) =>
-      passBodies(EFFECT_BY_ID[node.effectId]).map((_, passIdx) => ({ node, passIdx })),
-    );
-    let read = this.srcTex;
+    // run the whole chain through the ping-pong targets, then present
+    let read: WebGLTexture = this.srcTex;
     let w = 0;
-    for (let i = 0; i < draws.length; i++) {
-      const last = i === draws.length - 1;
-      const target = last ? null : this.fbos![w];
-      this.pass(draws[i].node, draws[i].passIdx, read, target, time);
-      if (!last) {
+    for (const node of active) {
+      const masked = node.mask !== undefined && node.mask.type > 0;
+      if (masked) this.blit(read, this.maskFbo);
+      const bodies = passBodies(EFFECT_BY_ID[node.effectId], node.code);
+      for (let passIdx = 0; passIdx < bodies.length; passIdx++) {
+        this.pass(node, passIdx, read, this.fbos![w], time);
+        read = this.texs![w];
+        w = 1 - w;
+      }
+      if (masked) {
+        this.maskPass(node, read, this.fbos![w]);
         read = this.texs![w];
         w = 1 - w;
       }
     }
+    if (split !== null) this.comparePass(read, split);
+    else this.blit(read);
   }
 }

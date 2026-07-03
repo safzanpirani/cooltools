@@ -2,9 +2,20 @@
 // modulated on the CPU each frame: value = base + band * (max - base),
 // so the slider position acts as the floor and audio pushes toward max.
 import { EFFECT_BY_ID } from "./effects/list";
-import type { AudioBand, PipelineNode } from "./effects/types";
+import type { AudioBand, ModSource, PipelineNode } from "./effects/types";
 
 export const BANDS: AudioBand[] = ["level", "bass", "mid", "treble"];
+// audio bands + time-based oscillators (LFOs work without a mic)
+export const MOD_SOURCES: ModSource[] = [...BANDS, "sine", "saw"];
+
+export function hasLfoMods(pipeline: PipelineNode[]): boolean {
+  return pipeline.some(
+    (n) =>
+      n.enabled &&
+      n.mods &&
+      Object.values(n.mods).some((m) => m === "sine" || m === "saw"),
+  );
+}
 
 let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
@@ -64,22 +75,36 @@ export function getBands(): Record<AudioBand, number> {
   return smoothed;
 }
 
-export function applyAudioMods(
+function modValue(
+  src: ModSource,
+  bands: Record<AudioBand, number>,
+  time: number,
+): number {
+  if (src === "sine") return 0.5 + 0.5 * Math.sin(time * 1.5);
+  if (src === "saw") return (time * 0.35) % 1;
+  return bands[src];
+}
+
+export function applyMods(
   pipeline: PipelineNode[],
   bands: Record<AudioBand, number>,
+  time: number,
 ): PipelineNode[] {
   return pipeline.map((node) => {
     if (!node.mods || Object.keys(node.mods).length === 0) return node;
     const effect = EFFECT_BY_ID[node.effectId];
     if (!effect) return node;
     const params = { ...node.params };
-    for (const [uniform, band] of Object.entries(node.mods)) {
+    for (const [uniform, src] of Object.entries(node.mods)) {
       const c = effect.controls.find(
         (ct) => ct.uniform === uniform && ct.type === "slider",
       );
       if (!c || c.type !== "slider") continue;
       const base = Number(params[uniform] ?? c.default);
-      params[uniform] = Math.min(c.max, base + bands[band] * (c.max - base));
+      params[uniform] = Math.min(
+        c.max,
+        base + modValue(src, bands, time) * (c.max - base),
+      );
     }
     return { ...node, params };
   });
