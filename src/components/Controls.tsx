@@ -1,19 +1,39 @@
 import { EFFECT_BY_ID } from "../effects/list";
 import { useStore } from "../store";
+import { BANDS } from "../audio";
 import type { PipelineNode } from "../effects/types";
 
 export function Controls({ node }: { node: PipelineNode }) {
   const effect = EFFECT_BY_ID[node.effectId];
   const setParam = useStore((s) => s.setParam);
+  const cycleMod = useStore((s) => s.cycleMod);
+  const audioOn = useStore((s) => s.audioOn);
 
   return (
     <div className="controls">
       {effect.controls.map((c) => {
         const val = node.params[c.uniform];
         if (c.type === "slider") {
+          const mod = node.mods?.[c.uniform];
           return (
             <label key={c.uniform} className="ctl">
               <span className="ctl-label">{c.label}</span>
+              <button
+                type="button"
+                className={`mod ${mod ? "on" : ""}`}
+                title={
+                  mod
+                    ? `audio-linked: ${mod} (click to cycle ${BANDS.join(" → ")} → off)`
+                    : "link to mic audio"
+                }
+                style={audioOn || mod ? undefined : { opacity: 0.35 }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  cycleMod(node.uid, c.uniform);
+                }}
+              >
+                {mod ? `♪${mod}` : "♪"}
+              </button>
               <span className="ctl-val">{Number(val).toFixed(c.step < 1 ? 2 : 0)}</span>
               <input
                 type="range"

@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { EFFECT_BY_ID, EFFECTS } from "./effects/list";
-import type { ParamValue, PipelineNode } from "./effects/types";
+import type { AudioBand, ParamValue, PipelineNode } from "./effects/types";
 import type { Preset } from "./presets";
+import { BANDS, startMic, stopMic } from "./audio";
 
 export interface Source {
   el: HTMLCanvasElement | HTMLVideoElement;
@@ -15,6 +16,11 @@ interface State {
   source: Source | null;
   pipeline: PipelineNode[];
   expanded: string | null;
+  audioOn: boolean;
+  seed: string | null;
+  startAudio: () => Promise<void>;
+  stopAudio: () => void;
+  cycleMod: (uid: string, uniform: string) => void;
   setSource: (el: HTMLCanvasElement, w: number, h: number, name: string) => void;
   addEffect: (effectId: string) => void;
   removeNode: (uid: string) => void;
@@ -24,7 +30,7 @@ interface State {
   resetNode: (uid: string) => void;
   setExpanded: (uid: string | null) => void;
   clear: () => void;
-  surprise: () => void;
+  surprise: (seed?: string) => void;
   applyPreset: (preset: Preset) => void;
   startWebcam: () => Promise<void>;
   stopWebcam: () => void;
@@ -94,14 +100,53 @@ export function sampleImage(): { el: HTMLCanvasElement; w: number; h: number } {
   return { el: cv, w, h };
 }
 
-function rand(min: number, max: number) {
-  return min + Math.random() * (max - min);
+// seeded RNG (xmur3 string hash -> mulberry32) so remixes are reproducible
+function seededRng(seed: string): () => number {
+  let h = 1779033703 ^ seed.length;
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  let a = (h ^= h >>> 16) >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 export const useStore = create<State>((set) => ({
   source: null,
   pipeline: [],
   expanded: null,
+  audioOn: false,
+  seed: null,
+
+  startAudio: async () => {
+    await startMic();
+    set({ audioOn: true });
+  },
+
+  stopAudio: () => {
+    stopMic();
+    set({ audioOn: false });
+  },
+
+  cycleMod: (id, uniform) =>
+    set((s) => ({
+      pipeline: s.pipeline.map((n) => {
+        if (n.uid !== id) return n;
+        const cur = n.mods?.[uniform];
+        const next: AudioBand | undefined =
+          cur === undefined ? BANDS[0] : BANDS[BANDS.indexOf(cur) + 1];
+        const mods = { ...(n.mods ?? {}) };
+        if (next) mods[uniform] = next;
+        else delete mods[uniform];
+        return { ...n, mods };
+      }),
+    })),
 
   setSource: (el, w, h, name) => set({ source: { el, w, h, name } }),
 
@@ -153,23 +198,26 @@ export const useStore = create<State>((set) => ({
 
   clear: () => set({ pipeline: [], expanded: null }),
 
-  surprise: () => {
-    const n = 2 + Math.floor(Math.random() * 3);
+  surprise: (seedArg?: string) => {
+    const seed = seedArg?.trim() || Math.random().toString(36).slice(2, 8);
+    const rng = seededRng(seed);
+    const n = 2 + Math.floor(rng() * 3);
     const pool = [...EFFECTS];
     const nodes: PipelineNode[] = [];
     for (let i = 0; i < n && pool.length; i++) {
-      const e = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+      const e = pool.splice(Math.floor(rng() * pool.length), 1)[0];
       const params: Record<string, ParamValue> = {};
       for (const c of e.controls) {
-        if (c.type === "slider") params[c.uniform] = +rand(c.min, c.max).toFixed(3);
-        else if (c.type === "toggle") params[c.uniform] = Math.random() < 0.5 ? 0 : 1;
+        if (c.type === "slider")
+          params[c.uniform] = +(c.min + rng() * (c.max - c.min)).toFixed(3);
+        else if (c.type === "toggle") params[c.uniform] = rng() < 0.5 ? 0 : 1;
         else if (c.type === "select")
-          params[c.uniform] = Math.floor(Math.random() * c.options.length);
+          params[c.uniform] = Math.floor(rng() * c.options.length);
         else params[c.uniform] = c.default;
       }
       nodes.push({ uid: uid(), effectId: e.id, enabled: true, params });
     }
-    set({ pipeline: nodes, expanded: null });
+    set({ pipeline: nodes, expanded: null, seed });
   },
 
   applyPreset: (preset) => {
@@ -215,13 +263,19 @@ export const useStore = create<State>((set) => ({
 }));
 
 // ---- URL share (encode pipeline into the hash) ----
-type Encoded = { e: string; on: number; p: Record<string, ParamValue> }[];
+type Encoded = {
+  e: string;
+  on: number;
+  p: Record<string, ParamValue>;
+  m?: Record<string, AudioBand>;
+}[];
 
 export function encodeState(pipeline: PipelineNode[]): string {
   const min: Encoded = pipeline.map((n) => ({
     e: n.effectId,
     on: n.enabled ? 1 : 0,
     p: n.params,
+    ...(n.mods && Object.keys(n.mods).length ? { m: n.mods } : {}),
   }));
   return btoa(encodeURIComponent(JSON.stringify(min)));
 }
@@ -236,6 +290,7 @@ export function decodeState(hash: string): PipelineNode[] | null {
         effectId: m.e,
         enabled: m.on === 1,
         params: { ...defaultParams(m.e), ...m.p },
+        ...(m.m ? { mods: m.m } : {}),
       }));
   } catch {
     return null;

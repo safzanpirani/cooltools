@@ -284,7 +284,7 @@ button:disabled {
 }
 .ctl {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
   gap: 2px 8px;
   font-size: 11px;
@@ -394,6 +394,27 @@ button:disabled {
 .toolbar .cam-on:hover {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+.toolbar .seed {
+  border-style: dashed;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.ctl .mod {
+  background: none;
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.ctl .mod.on {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .toast {

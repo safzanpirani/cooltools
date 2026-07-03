@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Renderer, setCurrentRenderer } from "../gl/renderer";
 import { EFFECT_BY_ID } from "../effects/list";
 import { fitToCanvas, useStore } from "../store";
+import { applyAudioMods, getBands } from "../audio";
+import { isRecording } from "../recorder";
 
 export function Preview() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -33,7 +35,7 @@ export function Preview() {
     let raf = 0;
     const start = performance.now();
     const loop = () => {
-      const { pipeline, source } = useStore.getState();
+      const { pipeline, source, audioOn } = useStore.getState();
       const live = source?.live === true;
       if (live) {
         renderer.updateSource(source.el);
@@ -41,11 +43,14 @@ export function Preview() {
       }
       const animated =
         live ||
+        audioOn ||
+        isRecording() ||
         pipeline.some((n) => n.enabled && EFFECT_BY_ID[n.effectId]?.animated);
       if (dirty.current || animated) {
         const t = (performance.now() - start) / 1000;
+        const frame = audioOn ? applyAudioMods(pipeline, getBands()) : pipeline;
         try {
-          renderer.render(pipeline, t);
+          renderer.render(frame, t);
           setError(null);
         } catch (e) {
           setError(String(e));

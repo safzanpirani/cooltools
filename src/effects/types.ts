@@ -65,11 +65,16 @@ export interface Effect {
 
 export type ParamValue = number | string;
 
+// frequency band a slider param can be linked to when the mic is live
+export type AudioBand = "level" | "bass" | "mid" | "treble";
+
 export interface PipelineNode {
   uid: string;
   effectId: string;
   enabled: boolean;
   params: Record<string, ParamValue>;
+  // slider uniform -> audio band driving it
+  mods?: Record<string, AudioBand>;
 }
 
 // helpers for terse control declarations
