@@ -50,6 +50,7 @@ interface State {
 let webcamStream: MediaStream | null = null;
 let videoUrl: string | null = null;
 let videoEl: HTMLVideoElement | null = null;
+let mediaRequestGeneration = 0;
 
 // stop any live media source (webcam stream or looping video file)
 function releaseMedia() {
@@ -59,12 +60,28 @@ function releaseMedia() {
   }
   if (videoEl) {
     videoEl.pause();
+    videoEl.srcObject = null;
+    videoEl.removeAttribute("src");
+    videoEl.load();
     videoEl = null;
   }
   if (videoUrl) {
     URL.revokeObjectURL(videoUrl);
     videoUrl = null;
   }
+}
+
+function releaseCandidateVideo(video: HTMLVideoElement, url?: string) {
+  video.pause();
+  video.srcObject = null;
+  video.removeAttribute("src");
+  video.load();
+  if (url) URL.revokeObjectURL(url);
+}
+
+function releaseCandidateStream(video: HTMLVideoElement, stream: MediaStream) {
+  releaseCandidateVideo(video);
+  stream.getTracks().forEach((track) => track.stop());
 }
 
 const MAX_DIM = 1600;
@@ -177,15 +194,26 @@ export const useStore = create<State>((set) => ({
     })),
 
   loadVideo: async (file) => {
-    releaseMedia();
-    videoUrl = URL.createObjectURL(file);
+    const generation = ++mediaRequestGeneration;
+    const url = URL.createObjectURL(file);
     const video = document.createElement("video");
-    video.src = videoUrl;
+    video.src = url;
     video.muted = true;
     video.loop = true;
     video.playsInline = true;
-    await video.play();
+    try {
+      await video.play();
+    } catch (error) {
+      releaseCandidateVideo(video, url);
+      throw error;
+    }
+    if (generation !== mediaRequestGeneration) {
+      releaseCandidateVideo(video, url);
+      return;
+    }
+    releaseMedia();
     videoEl = video;
+    videoUrl = url;
     const iw = video.videoWidth || 1280;
     const ih = video.videoHeight || 720;
     const scale = Math.min(1, MAX_DIM / Math.max(iw, ih));
@@ -227,6 +255,7 @@ export const useStore = create<State>((set) => ({
     })),
 
   setSource: (el, w, h, name) => {
+    mediaRequestGeneration++;
     releaseMedia();
     set({ source: { el, w, h, name } });
   },
@@ -307,17 +336,28 @@ export const useStore = create<State>((set) => ({
   },
 
   startWebcam: async () => {
+    const generation = ++mediaRequestGeneration;
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: 1280, height: 720 },
       audio: false,
     });
-    releaseMedia();
-    webcamStream = stream;
     const video = document.createElement("video");
     video.srcObject = stream;
     video.muted = true;
     video.playsInline = true;
-    await video.play();
+    try {
+      await video.play();
+    } catch (error) {
+      releaseCandidateStream(video, stream);
+      throw error;
+    }
+    if (generation !== mediaRequestGeneration) {
+      releaseCandidateStream(video, stream);
+      return;
+    }
+    releaseMedia();
+    webcamStream = stream;
+    videoEl = video;
     set({
       source: {
         el: video,
@@ -330,6 +370,7 @@ export const useStore = create<State>((set) => ({
   },
 
   stopWebcam: () => {
+    mediaRequestGeneration++;
     releaseMedia();
     const { el, w, h } = sampleImage();
     set({ source: { el, w, h, name: "sample" } });
@@ -367,20 +408,107 @@ export function encodeState(pipeline: PipelineNode[]): string {
   return btoa(encodeURIComponent(JSON.stringify(min)));
 }
 
+const MAX_SHARED_NODES = 100;
+const MAX_SHARED_CODE_LENGTH = 100_000;
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function decodedParams(effectId: string, value: unknown): Record<string, ParamValue> {
+  const params = defaultParams(effectId);
+  if (!isRecord(value)) return params;
+  for (const control of EFFECT_BY_ID[effectId].controls) {
+    const candidate = value[control.uniform];
+    if (control.type === "color") {
+      if (typeof candidate === "string" && HEX_COLOR.test(candidate)) {
+        params[control.uniform] = candidate;
+      }
+      continue;
+    }
+    const n = finiteNumber(candidate);
+    if (n === null) continue;
+    if (control.type === "slider") {
+      params[control.uniform] = clamp(n, control.min, control.max);
+    } else if (control.type === "toggle") {
+      params[control.uniform] = n > 0.5 ? 1 : 0;
+    } else {
+      params[control.uniform] = clamp(Math.round(n), 0, control.options.length - 1);
+    }
+  }
+  return params;
+}
+
+function decodedMods(effectId: string, value: unknown): Record<string, ModSource> | null {
+  if (!isRecord(value)) return null;
+  const mods: Record<string, ModSource> = {};
+  for (const control of EFFECT_BY_ID[effectId].controls) {
+    if (control.type !== "slider") continue;
+    const candidate = value[control.uniform];
+    if (MOD_SOURCES.some((source) => source === candidate)) {
+      mods[control.uniform] = candidate as ModSource;
+    }
+  }
+  return Object.keys(mods).length ? mods : null;
+}
+
+function decodedMask(value: unknown): MaskParams | null {
+  if (!isRecord(value)) return null;
+  const mask = defaultMask();
+  const type = finiteNumber(value.type);
+  const invert = finiteNumber(value.invert);
+  const cx = finiteNumber(value.cx);
+  const cy = finiteNumber(value.cy);
+  const size = finiteNumber(value.size);
+  const feather = finiteNumber(value.feather);
+  const angle = finiteNumber(value.angle);
+  if (type !== null) mask.type = clamp(Math.round(type), 0, 2);
+  if (invert !== null) mask.invert = invert > 0.5 ? 1 : 0;
+  if (cx !== null) mask.cx = clamp(cx, 0, 1);
+  if (cy !== null) mask.cy = clamp(cy, 0, 1);
+  if (size !== null) mask.size = clamp(size, 0.02, 1);
+  if (feather !== null) mask.feather = clamp(feather, 0.001, 0.5);
+  if (angle !== null) mask.angle = clamp(angle, 0, 360);
+  return mask.type > 0 ? mask : null;
+}
+
 export function decodeState(hash: string): PipelineNode[] | null {
   try {
-    const min: Encoded = JSON.parse(decodeURIComponent(atob(hash)));
-    return min
-      .filter((m) => EFFECT_BY_ID[m.e])
-      .map((m) => ({
+    const decoded: unknown = JSON.parse(decodeURIComponent(atob(hash)));
+    if (!Array.isArray(decoded) || decoded.length > MAX_SHARED_NODES) return null;
+    const pipeline: PipelineNode[] = [];
+    for (const item of decoded) {
+      if (!isRecord(item) || typeof item.e !== "string" || !EFFECT_BY_ID[item.e]) {
+        continue;
+      }
+      const mods = decodedMods(item.e, item.m);
+      const mask = decodedMask(item.k);
+      const code =
+        item.e === "custom" &&
+        typeof item.c === "string" &&
+        item.c.length <= MAX_SHARED_CODE_LENGTH
+          ? item.c
+          : null;
+      pipeline.push({
         uid: uid(),
-        effectId: m.e,
-        enabled: m.on === 1,
-        params: { ...defaultParams(m.e), ...m.p },
-        ...(m.m ? { mods: m.m } : {}),
-        ...(m.c !== undefined ? { code: m.c } : {}),
-        ...(m.k ? { mask: { ...defaultMask(), ...m.k } } : {}),
-      }));
+        effectId: item.e,
+        enabled: item.on === 1,
+        params: decodedParams(item.e, item.p),
+        ...(mods ? { mods } : {}),
+        ...(code !== null ? { code } : {}),
+        ...(mask ? { mask } : {}),
+      });
+    }
+    return pipeline;
   } catch {
     return null;
   }

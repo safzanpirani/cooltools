@@ -46,19 +46,25 @@ export function Sidebar() {
     }
     if (!file.type.startsWith("image/")) return;
     const img = new Image();
+    const url = URL.createObjectURL(file);
     img.onload = () => {
       const { el, w, h } = fitToCanvas(img, img.naturalWidth, img.naturalHeight);
       setSource(el, w, h, file.name);
-      URL.revokeObjectURL(img.src);
+      URL.revokeObjectURL(url);
     };
-    img.src = URL.createObjectURL(file);
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      flash("could not load image");
+    };
+    img.src = url;
   }
 
   function exportPNG() {
     const c = document.getElementById("glcanvas") as HTMLCanvasElement | null;
     if (!c) return;
-    // no preserveDrawingBuffer — render fresh so toBlob snapshots a live frame
-    getCurrentRenderer()?.render(useStore.getState().pipeline, performance.now() / 1000);
+    // no preserveDrawingBuffer — redraw the last effective (modulated) frame
+    // synchronously, without the compare divider, before reading the canvas
+    if (!getCurrentRenderer()?.redrawLastFrame()) return flash("nothing to export yet");
     c.toBlob((blob) => {
       if (!blob) return;
       const a = document.createElement("a");
@@ -72,7 +78,7 @@ export function Sidebar() {
   function copyPNG() {
     const c = document.getElementById("glcanvas") as HTMLCanvasElement | null;
     if (!c || typeof ClipboardItem === "undefined") return flash("clipboard unsupported");
-    getCurrentRenderer()?.render(useStore.getState().pipeline, performance.now() / 1000);
+    if (!getCurrentRenderer()?.redrawLastFrame()) return flash("nothing to copy yet");
     c.toBlob((blob) => {
       if (!blob) return;
       navigator.clipboard
@@ -83,21 +89,31 @@ export function Sidebar() {
 
   async function toggleRecord() {
     if (isRecording()) {
-      const blob = await stopRecording();
-      setRec(false);
-      if (!blob) return flash("nothing recorded");
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `cooltools-${Date.now()}.webm`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      flash("webm saved");
+      try {
+        const result = await stopRecording();
+        setRec(false);
+        if (!result) return flash("nothing recorded");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(result.blob);
+        a.download = `cooltools-${Date.now()}${result.extension}`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        flash(`${result.extension.slice(1)} saved`);
+      } catch {
+        setRec(false);
+        flash("could not stop recording");
+      }
     } else {
       const c = document.getElementById("glcanvas") as HTMLCanvasElement | null;
       if (!c) return;
-      startRecording(c);
-      setRec(true);
-      flash("recording…");
+      try {
+        startRecording(c);
+        setRec(true);
+        flash("recording…");
+      } catch {
+        setRec(false);
+        flash("recording unavailable");
+      }
     }
   }
 
@@ -188,7 +204,11 @@ export function Sidebar() {
           type="file"
           accept="image/*,video/*"
           hidden
-          onChange={(e) => onUpload(e.target.files?.[0])}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            onUpload(file);
+          }}
         />
       </div>
 

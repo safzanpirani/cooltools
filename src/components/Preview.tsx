@@ -76,6 +76,8 @@ export function Preview() {
       unsub();
       cancelAnimationFrame(raf);
       setCurrentRenderer(null);
+      renderer.dispose();
+      rendererRef.current = null;
     };
   }, []);
 
@@ -94,12 +96,17 @@ export function Preview() {
     }
     if (!file.type.startsWith("image/")) return;
     const img = new Image();
+    const url = URL.createObjectURL(file);
     img.onload = () => {
       const { el, w, h } = fitToCanvas(img, img.naturalWidth, img.naturalHeight);
       setSource(el, w, h, file.name);
-      URL.revokeObjectURL(img.src);
+      URL.revokeObjectURL(url);
     };
-    img.src = URL.createObjectURL(file);
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      setError("could not load image");
+    };
+    img.src = url;
   }
 
   // paste image from clipboard anywhere on the page

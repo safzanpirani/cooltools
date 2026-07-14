@@ -144,7 +144,9 @@ export function setCurrentRenderer(r: Renderer | null) {
 export class Renderer {
   private gl: WebGL2RenderingContext;
   private vao: WebGLVertexArrayObject;
+  private quadBuffer: WebGLBuffer;
   private programs = new Map<string, Program>();
+  private codeProgramKeys = new Set<string>();
   private passthrough: Program;
   private comparer: Program;
   private masker: Program;
@@ -156,6 +158,8 @@ export class Renderer {
   private maskTex: WebGLTexture | null = null;
   // half-float intermediates avoid 8-bit quantization between chained passes
   private halfFloat: boolean;
+  private lastFrame: { pipeline: PipelineNode[]; time: number } | null = null;
+  private disposed = false;
   width = 0;
   height = 0;
 
@@ -169,8 +173,8 @@ export class Renderer {
     this.halfFloat = !!gl.getExtension("EXT_color_buffer_float");
 
     // fullscreen quad
-    const buf = gl.createBuffer()!;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    this.quadBuffer = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
     gl.bufferData(
       gl.ARRAY_BUFFER,
       new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
@@ -203,26 +207,44 @@ export class Renderer {
   private compile(frag: string, effect: Effect | null): Program {
     const gl = this.gl;
     const vs = this.compileShader(gl.VERTEX_SHADER, VERT);
-    const fs = this.compileShader(gl.FRAGMENT_SHADER, frag);
-    const prog = gl.createProgram()!;
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.bindAttribLocation(prog, 0, "aPos");
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      throw new Error("link failed: " + gl.getProgramInfoLog(prog));
+    let fs: WebGLShader | null = null;
+    let prog: WebGLProgram | null = null;
+    try {
+      fs = this.compileShader(gl.FRAGMENT_SHADER, frag);
+      prog = gl.createProgram()!;
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.bindAttribLocation(prog, 0, "aPos");
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        throw new Error("link failed: " + gl.getProgramInfoLog(prog));
+      }
+      const resources = effect?.resources ? effect.resources(gl) : null;
+      return { prog, locs: new Map(), resources };
+    } catch (error) {
+      if (prog) gl.deleteProgram(prog);
+      throw error;
+    } finally {
+      gl.deleteShader(vs);
+      if (fs) gl.deleteShader(fs);
     }
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    const resources = effect?.resources ? effect.resources(gl) : null;
-    return { prog, locs: new Map(), resources };
+  }
+
+  private programKey(effect: Effect, passIdx: number, code?: string): string {
+    return code !== undefined
+      ? `${effect.id}@${hashStr(code)}#${passIdx}`
+      : `${effect.id}#${passIdx}`;
+  }
+
+  private deleteProgram(program: Program) {
+    for (const texture of program.resources?.textures ?? []) {
+      this.gl.deleteTexture(texture.texture);
+    }
+    this.gl.deleteProgram(program.prog);
   }
 
   private programFor(effect: Effect, passIdx: number, code?: string): Program {
-    const key =
-      code !== undefined
-        ? `${effect.id}@${hashStr(code)}#${passIdx}`
-        : `${effect.id}#${passIdx}`;
+    const key = this.programKey(effect, passIdx, code);
     let p = this.programs.get(key);
     if (!p) {
       const body = passBodies(effect, code)[passIdx];
@@ -244,8 +266,28 @@ export class Renderer {
         p = this.compile(buildFrag(effect, body), passIdx === 0 ? effect : null);
       }
       this.programs.set(key, p);
+      if (code !== undefined) this.codeProgramKeys.add(key);
     }
     return p;
+  }
+
+  private releaseUnusedCodePrograms(active: PipelineNode[]) {
+    const retained = new Set<string>();
+    for (const node of active) {
+      if (node.code === undefined) continue;
+      const effect = EFFECT_BY_ID[node.effectId];
+      const passCount = passBodies(effect, node.code).length;
+      for (let passIdx = 0; passIdx < passCount; passIdx++) {
+        retained.add(this.programKey(effect, passIdx, node.code));
+      }
+    }
+    for (const key of this.codeProgramKeys) {
+      if (retained.has(key)) continue;
+      const program = this.programs.get(key);
+      if (program) this.deleteProgram(program);
+      this.programs.delete(key);
+      this.codeProgramKeys.delete(key);
+    }
   }
 
   private loc(p: Program, name: string): WebGLUniformLocation | null {
@@ -423,8 +465,10 @@ export class Renderer {
   }
 
   render(pipeline: PipelineNode[], time: number, split: number | null = null) {
-    if (!this.srcTex) return;
+    if (this.disposed || !this.srcTex) return;
+    this.lastFrame = { pipeline, time };
     const active = pipeline.filter((n) => n.enabled && EFFECT_BY_ID[n.effectId]);
+    this.releaseUnusedCodePrograms(active);
     if (active.length === 0) {
       if (split !== null) this.comparePass(this.srcTex, split);
       else this.blit(this.srcTex);
@@ -450,5 +494,52 @@ export class Renderer {
     }
     if (split !== null) this.comparePass(read, split);
     else this.blit(read);
+  }
+
+  // Redraw the exact effective frame most recently presented. Captures call
+  // this synchronously because the canvas does not preserve its draw buffer.
+  redrawLastFrame(): boolean {
+    if (this.disposed || !this.lastFrame) return false;
+    this.render(this.lastFrame.pipeline, this.lastFrame.time, null);
+    return true;
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    const gl = this.gl;
+    const deletedTextures = new Set<WebGLTexture>();
+    const deleteProgram = (program: Program) => {
+      for (const resource of program.resources?.textures ?? []) {
+        if (!deletedTextures.has(resource.texture)) {
+          gl.deleteTexture(resource.texture);
+          deletedTextures.add(resource.texture);
+        }
+      }
+      gl.deleteProgram(program.prog);
+    };
+    for (const program of this.programs.values()) deleteProgram(program);
+    deleteProgram(this.passthrough);
+    deleteProgram(this.comparer);
+    deleteProgram(this.masker);
+    for (const texture of [this.srcTex, ...(this.texs ?? []), this.maskTex]) {
+      if (texture && !deletedTextures.has(texture)) {
+        gl.deleteTexture(texture);
+        deletedTextures.add(texture);
+      }
+    }
+    for (const fbo of [...(this.fbos ?? []), this.maskFbo]) {
+      if (fbo) gl.deleteFramebuffer(fbo);
+    }
+    gl.deleteVertexArray(this.vao);
+    gl.deleteBuffer(this.quadBuffer);
+    this.programs.clear();
+    this.codeProgramKeys.clear();
+    this.lastFrame = null;
+    this.srcTex = null;
+    this.fbos = null;
+    this.texs = null;
+    this.maskFbo = null;
+    this.maskTex = null;
   }
 }
