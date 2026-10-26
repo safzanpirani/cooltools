@@ -6,7 +6,7 @@ In-browser WebGL2 image/video effects tool. React 19 + TypeScript + Vite + Zusta
 
 ```bash
 npm run dev       # vite dev server
-npm run build     # tsc -b && vite build  (run this to typecheck)
+npm run build     # tsrs -b && vite build  (run this to typecheck)
 npm run lint      # oxlint
 npm run preview   # serve dist/
 ```
